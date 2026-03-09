@@ -23,19 +23,35 @@ bool lwBegin() {
   EEPROM.init();
   EEPROM.setLength(EEPROM_TOTAL_BYTES);
 
+  // Many SX126x boards (including LoRa Thing Plus variants) route
+  // the RF front-end switch to DIO2. If this is not enabled, TX can
+  // appear to work in logs while no RF packet is actually radiated.
+  int16_t state = radio.setDio2AsRfSwitch();
+  if((state != RADIOLIB_ERR_NONE) && (state != RADIOLIB_ERR_UNSUPPORTED)) {
+    Serial.print(F("[LoRaWAN] RF switch setup failed, code "));
+    Serial.println(state);
+    return false;
+  }
+
 #if (LORAWAN_OTAA == 1)
   #if (LORAWAN_VERSION == 1)
-    node.beginOTAA(joinEUI, devEUI, nwkKey, appKey);
+    state = node.beginOTAA(joinEUI, devEUI, nwkKey, appKey);
   #else
-    node.beginOTAA(joinEUI, devEUI, NULL, appKey);
+    state = node.beginOTAA(joinEUI, devEUI, NULL, appKey);
   #endif
 #else
   #if (LORAWAN_VERSION == 1)
-    node.beginABP(devAddr, fNwkSIntKey, sNwkSIntKey, sNwkSEncKey, appSKey);
+    state = node.beginABP(devAddr, fNwkSIntKey, sNwkSIntKey, sNwkSEncKey, appSKey);
   #else
-    node.beginABP(devAddr, NULL, NULL, sNwkSEncKey, appSKey);
+    state = node.beginABP(devAddr, NULL, NULL, sNwkSEncKey, appSKey);
   #endif
 #endif
+
+  if(state != RADIOLIB_ERR_NONE) {
+    Serial.print(F("[LoRaWAN] Node begin failed, code "));
+    Serial.println(state);
+    return false;
+  }
 
   return true;
 }

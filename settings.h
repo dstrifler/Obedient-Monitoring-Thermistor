@@ -180,54 +180,66 @@ AppSettings* settingsGet()
 
 bool settingsSetTempEnabled(bool enabled)
 {
-  gSettings.tempEnabled = enabled ? 1 : 0;
-  return true;
+  uint8_t newValue = enabled ? 1 : 0;
+  bool changed = (gSettings.tempEnabled != newValue);
+  gSettings.tempEnabled = newValue;
+  return changed;
 }
 
 bool settingsSetHumidityEnabled(bool enabled)
 {
-  gSettings.humidityEnabled = enabled ? 1 : 0;
-  return true;
+  uint8_t newValue = enabled ? 1 : 0;
+  bool changed = (gSettings.humidityEnabled != newValue);
+  gSettings.humidityEnabled = newValue;
+  return changed;
 }
 
 bool settingsSetPressureEnabled(bool enabled)
 {
-  gSettings.pressureEnabled = enabled ? 1 : 0;
-  return true;
+  uint8_t newValue = enabled ? 1 : 0;
+  bool changed = (gSettings.pressureEnabled != newValue);
+  gSettings.pressureEnabled = newValue;
+  return changed;
 }
 
 bool settingsSetGasEnabled(bool enabled)
 {
-  gSettings.gasEnabled = enabled ? 1 : 0;
-  return true;
+  uint8_t newValue = enabled ? 1 : 0;
+  bool changed = (gSettings.gasEnabled != newValue);
+  gSettings.gasEnabled = newValue;
+  return changed;
 }
 
 bool settingsSetTempUnit(uint8_t unit)
 {
   if(unit > TEMP_UNIT_F) return false;
+  bool changed = (gSettings.tempUnit != unit);
   gSettings.tempUnit = unit;
-  return true;
+  return changed;
 }
 
 bool settingsSetPressureUnit(uint8_t unit)
 {
   if(unit > PRESSURE_UNIT_PA) return false;
+  bool changed = (gSettings.pressureUnit != unit);
   gSettings.pressureUnit = unit;
-  return true;
+  return changed;
 }
 
 bool settingsSetPayloadMode(uint8_t mode)
 {
   if(mode > PAYLOAD_MODE_VERBOSE_DEBUG) return false;
+  bool changed = (gSettings.payloadMode != mode);
   gSettings.payloadMode = mode;
-  return true;
+  return changed;
 }
 
 bool settingsSetReportInterval(uint8_t minutes)
 {
   if(!settingsIsValidInterval(minutes)) return false;
+  bool changed = (gSettings.reportIntervalMin != minutes);
   gSettings.reportIntervalMin = minutes;
-  return true;
+  return changed;
 }
 
 #endif

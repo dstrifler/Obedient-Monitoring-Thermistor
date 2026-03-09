@@ -28,6 +28,18 @@ bool sensorBegin() {
   gBme.setTPH();
   gBme.setHeaterProf(300, 100);
   gBme.setOpMode(BME68X_FORCED_MODE);
+  delay(BME68X_FORCED_DELAY_MS);
+
+  if(!gBme.fetchData()) {
+    gSensorPresent = false;
+    return false;
+  }
+
+  bme68xData raw;
+  if(!gBme.getData(raw)) {
+    gSensorPresent = false;
+    return false;
+  }
 
   gSensorPresent = true;
   return true;
@@ -39,19 +51,23 @@ bool sensorRead(SensorData* data) {
   }
 
   if(!gSensorPresent) {
-    return false;
+    if(!sensorBegin()) {
+      return false;
+    }
   }
 
   gBme.setOpMode(BME68X_FORCED_MODE);
   delay(BME68X_FORCED_DELAY_MS);
 
   if(!gBme.fetchData()) {
+    gSensorPresent = false;
     return false;
   }
 
   bme68xData raw;
 
   if(!gBme.getData(raw)) {
+    gSensorPresent = false;
     return false;
   }
 

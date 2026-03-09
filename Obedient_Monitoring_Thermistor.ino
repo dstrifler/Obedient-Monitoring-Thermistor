@@ -171,6 +171,7 @@ static void printDownlinkPayload(const uint8_t* buffer, size_t len) {
 }
 
 static bool ensureJoined() {
+  gLoRaJoined = node.isActivated();
   if(gLoRaJoined) {
     return true;
   }
@@ -178,6 +179,7 @@ static bool ensureJoined() {
   Serial.println(F("[LoRaWAN] Not joined. Trying to join..."));
 
   gLoRaJoined = lwActivate();
+  gLoRaJoined = gLoRaJoined && node.isActivated();
 
   if(gLoRaJoined) {
     syncPeriodicityFromSettings();
@@ -211,6 +213,17 @@ void setup() {
     Serial.println(F("[Sensor] BME68x initialized."));
   }
 
+  Serial.print(F("[LoRaWAN] Initialise the radio ... "));
+  int16_t radioState = radio.begin();
+  if(radioState != RADIOLIB_ERR_NONE) {
+    Serial.print(F("failed, code "));
+    Serial.println(radioState);
+    while(true) {
+      delay(1000);
+    }
+  }
+  Serial.println(F("success!"));
+
   if(!lwBegin()) {
     Serial.println(F("[LoRaWAN] Begin failed."));
     while(true) {
@@ -227,6 +240,7 @@ void setup() {
   gLastReportMs = millis() - (periodicity * 1000UL);
 
   gLoRaJoined = lwActivate();
+  gLoRaJoined = gLoRaJoined && node.isActivated();
   if(gLoRaJoined) {
     Serial.println(F("[LoRaWAN] Initial join successful."));
   } else {
@@ -249,6 +263,7 @@ void loop() {
   // ------------------------------------------------------------
   // JOIN MANAGEMENT
   // ------------------------------------------------------------
+  gLoRaJoined = node.isActivated();
   if(!gLoRaJoined) {
     if((now - gLastJoinAttemptMs) >= JOIN_RETRY_MS) {
       gLastJoinAttemptMs = now;

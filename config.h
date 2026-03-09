@@ -27,7 +27,6 @@ SX1262 radio = new Module(D36, D40, D44, D39, SPI1);
 #define LORAWAN_OTAA     (1)   // 1 = OTAA, 0 = ABP
 
 #define LORAWAN_UPLINK_FPORT   1
-#define LORAWAN_SCAN_GUARD_MS  100
 
 // LoRaWAN reserves FPort 0 for MAC commands.
 // Application payload must use ports 1..223.

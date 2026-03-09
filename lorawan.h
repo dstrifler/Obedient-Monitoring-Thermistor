@@ -9,10 +9,6 @@
 #include "config.h"
 #include "eeprom_layout.h"
 
-#ifndef LORAWAN_SCAN_GUARD_MS
-#define LORAWAN_SCAN_GUARD_MS 100
-#endif
-
 #ifndef LORAWAN_UPLINK_FPORT
 #define LORAWAN_UPLINK_FPORT 1
 #endif
@@ -26,8 +22,6 @@ static uint8_t LWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
 bool lwBegin() {
   EEPROM.init();
   EEPROM.setLength(EEPROM_TOTAL_BYTES);
-
-  node.scanGuard = LORAWAN_SCAN_GUARD_MS;
 
 #if (LORAWAN_OTAA == 1)
   #if (LORAWAN_VERSION == 1)

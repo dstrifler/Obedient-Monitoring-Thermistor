@@ -29,6 +29,12 @@ SX1262 radio = new Module(D36, D40, D44, D39, SPI1);
 #define LORAWAN_UPLINK_FPORT   1
 #define LORAWAN_SCAN_GUARD_MS  100
 
+// LoRaWAN reserves FPort 0 for MAC commands.
+// Application payload must use ports 1..223.
+#if (LORAWAN_UPLINK_FPORT == 0) || (LORAWAN_UPLINK_FPORT > 223)
+#error "LORAWAN_UPLINK_FPORT must be in range 1..223 (0 is reserved by LoRaWAN MAC)."
+#endif
+
 // how often to send an uplink by default
 const uint32_t uplinkIntervalSeconds = 15UL * 60UL;
 

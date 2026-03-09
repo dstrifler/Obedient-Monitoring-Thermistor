@@ -76,6 +76,22 @@ static const char* payloadPressureUnitLabel(uint8_t pressureUnit) {
 }
 
 // ============================================================
+// BINARY SERIALIZATION HELPERS
+// ============================================================
+
+static void payloadWriteU16BE(uint8_t* dst, uint16_t value) {
+  dst[0] = (uint8_t)((value >> 8) & 0xFF);
+  dst[1] = (uint8_t)(value & 0xFF);
+}
+
+static void payloadWriteU32BE(uint8_t* dst, uint32_t value) {
+  dst[0] = (uint8_t)((value >> 24) & 0xFF);
+  dst[1] = (uint8_t)((value >> 16) & 0xFF);
+  dst[2] = (uint8_t)((value >> 8) & 0xFF);
+  dst[3] = (uint8_t)(value & 0xFF);
+}
+
+// ============================================================
 // COMPACT BINARY ENCODER
 // ============================================================
 //
@@ -91,8 +107,8 @@ static const char* payloadPressureUnitLabel(uint8_t pressureUnit) {
 // pressure uint32 (Pa, hPa x100, or inHg x1000 depending on unit)
 // gas      uint32 (ohms)
 //
-// Note: multibyte integers are encoded in native little-endian order
-// for this MCU/project.
+// Note: multibyte integers are encoded in big-endian (network byte order)
+// for cross-platform decoding compatibility.
 //
 // ============================================================
 
@@ -140,13 +156,13 @@ static size_t payloadEncodeCompactBin(
   if(settings->tempEnabled) {
     float tempOut = payloadTempForOutput(data->temperatureC, settings->tempUnit);
     int16_t tempScaled = (int16_t)lroundf(tempOut * 100.0f);
-    memcpy(&buffer[idx], &tempScaled, sizeof(tempScaled));
+    payloadWriteU16BE(&buffer[idx], (uint16_t)tempScaled);
     idx += sizeof(tempScaled);
   }
 
   if(settings->humidityEnabled) {
     uint16_t humScaled = (uint16_t)lroundf(data->humidityPct * 100.0f);
-    memcpy(&buffer[idx], &humScaled, sizeof(humScaled));
+    payloadWriteU16BE(&buffer[idx], humScaled);
     idx += sizeof(humScaled);
   }
 
@@ -169,13 +185,13 @@ static size_t payloadEncodeCompactBin(
         break;
     }
 
-    memcpy(&buffer[idx], &pressureScaled, sizeof(pressureScaled));
+    payloadWriteU32BE(&buffer[idx], pressureScaled);
     idx += sizeof(pressureScaled);
   }
 
   if(settings->gasEnabled) {
     uint32_t gas = data->gasOhms;
-    memcpy(&buffer[idx], &gas, sizeof(gas));
+    payloadWriteU32BE(&buffer[idx], gas);
     idx += sizeof(gas);
   }
 

@@ -18,6 +18,7 @@ static uint32_t gPeriodicitySeconds = DEFAULT_UPLINK_INTERVAL_SECONDS;
 static uint32_t gPeriodicityMs = DEFAULT_UPLINK_INTERVAL_SECONDS * 1000UL;
 
 static const uint32_t JOIN_RETRY_MS = 60000UL;
+static const uint32_t REPORT_RETRY_BACKOFF_MS = 5000UL;
 static const uint32_t LOOP_SLICE_MS = 50UL;
 
 enum SchedulerState : uint8_t {
@@ -316,6 +317,7 @@ void loop() {
     case SCHED_TRIGGER_SENSOR:
       if(!sensorTrigger()) {
         Serial.println(F("[Sensor] Trigger failed."));
+        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
         gSchedulerState = SCHED_WAIT_FOR_REPORT;
         return;
       }
@@ -332,6 +334,7 @@ void loop() {
       memset(&gPendingSensorData, 0, sizeof(gPendingSensorData));
       if(!sensorFetch(&gPendingSensorData)) {
         Serial.println(F("[Sensor] Read failed."));
+        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
         gSchedulerState = SCHED_WAIT_FOR_REPORT;
         return;
       }
@@ -350,6 +353,7 @@ void loop() {
 
       if(gPendingUplinkLen == 0) {
         Serial.println(F("[Payload] Encode failed."));
+        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
         gSchedulerState = SCHED_WAIT_FOR_REPORT;
         return;
       }
@@ -383,6 +387,7 @@ void loop() {
           return;
         }
 
+        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
         gSchedulerState = SCHED_WAIT_FOR_REPORT;
         return;
       }

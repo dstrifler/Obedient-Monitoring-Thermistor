@@ -45,40 +45,6 @@ bool sensorBegin() {
   return true;
 }
 
-bool sensorRead(SensorData* data) {
-  if(data == nullptr) {
-    return false;
-  }
-
-  if(!gSensorPresent) {
-    if(!sensorBegin()) {
-      return false;
-    }
-  }
-
-  gBme.setOpMode(BME68X_FORCED_MODE);
-  delay(SENSOR_FORCED_DELAY_MS);
-
-  if(!gBme.fetchData()) {
-    gSensorPresent = false;
-    return false;
-  }
-
-  bme68xData raw;
-
-  if(!gBme.getData(raw)) {
-    gSensorPresent = false;
-    return false;
-  }
-
-  data->temperatureC = raw.temperature;
-  data->humidityPct  = raw.humidity;
-  data->pressurePa   = raw.pressure;
-  data->gasOhms      = raw.gas_resistance;
-
-  return true;
-}
-
 bool sensorTrigger() {
   if(!gSensorPresent) {
     if(!sensorBegin()) {

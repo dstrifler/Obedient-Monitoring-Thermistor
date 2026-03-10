@@ -1,5 +1,5 @@
-#ifndef _SETTINGS_H
-#define _SETTINGS_H
+#ifndef _SETTINGS_SERVICE_H
+#define _SETTINGS_SERVICE_H
 
 #include <Arduino.h>
 #include <EEPROM.h>

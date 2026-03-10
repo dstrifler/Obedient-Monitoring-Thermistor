@@ -36,41 +36,13 @@ static uint8_t gNwkKey[] = { LORA_NWK_KEY };
 
 #else
 
-#ifndef RADIOLIB_LORAWAN_DEV_ADDR
-#define RADIOLIB_LORAWAN_DEV_ADDR  0x00000000
-#endif
-
-#ifndef RADIOLIB_LORAWAN_NWKSENC_KEY
-#define RADIOLIB_LORAWAN_NWKSENC_KEY \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-#endif
-
-#ifndef RADIOLIB_LORAWAN_APPS_KEY
-#define RADIOLIB_LORAWAN_APPS_KEY \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-#endif
-
-static uint32_t gDevAddr = RADIOLIB_LORAWAN_DEV_ADDR;
-static uint8_t gSNwkSEncKey[] = { RADIOLIB_LORAWAN_NWKSENC_KEY };
-static uint8_t gAppSKey[]     = { RADIOLIB_LORAWAN_APPS_KEY };
+static uint32_t gDevAddr = LORA_DEV_ADDR;
+static uint8_t gSNwkSEncKey[] = { LORA_NWKS_ENC_KEY };
+static uint8_t gAppSKey[]     = { LORA_APP_S_KEY };
 
 #if (LORA_VERSION == 1)
-#ifndef RADIOLIB_LORAWAN_FNWKSINT_KEY
-#define RADIOLIB_LORAWAN_FNWKSINT_KEY \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-#endif
-
-#ifndef RADIOLIB_LORAWAN_SNWKSINT_KEY
-#define RADIOLIB_LORAWAN_SNWKSINT_KEY \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-#endif
-
-static uint8_t gFNwkSIntKey[] = { RADIOLIB_LORAWAN_FNWKSINT_KEY };
-static uint8_t gSNwkSIntKey[] = { RADIOLIB_LORAWAN_SNWKSINT_KEY };
+static uint8_t gFNwkSIntKey[] = { LORA_FNWKS_INT_KEY };
+static uint8_t gSNwkSIntKey[] = { LORA_SNWKS_INT_KEY };
 #endif
 
 #endif

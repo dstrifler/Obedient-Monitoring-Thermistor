@@ -49,6 +49,15 @@ static uint8_t gSNwkSIntKey[] = { LORA_SNWKS_INT_KEY };
 
 static uint8_t gLWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
 
+static void lwInvalidatePersistedNonces(bool wipeNonces) {
+  if(wipeNonces) {
+    memset(gLWnonces, 0, sizeof(gLWnonces));
+    EEPROM.put(EEPROM_LORAWAN_NONCES_ADDR, gLWnonces);
+  }
+
+  EEPROM.write(EEPROM_LORAWAN_FLAG_ADDR, 0x00);
+}
+
 // ============================================================
 // LORAWAN INIT
 // ============================================================
@@ -124,6 +133,13 @@ int16_t lwRestore() {
     gRadio.standby();
     EEPROM.get(EEPROM_LORAWAN_NONCES_ADDR, gLWnonces);
     state = gNode.setBufferNonces(gLWnonces);
+
+    if(state != RADIOLIB_LORAWAN_SESSION_RESTORED) {
+      lwInvalidatePersistedNonces(true);
+      Serial.print(F("[LoRaWAN] Restore data rejected (state "));
+      Serial.print(state);
+      Serial.println(F("). Invalidated persisted nonces; a fresh session will be created."));
+    }
 
     Serial.print(F("[LoRaWAN] Nonce restore state: "));
     Serial.println(state);

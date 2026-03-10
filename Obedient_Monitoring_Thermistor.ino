@@ -377,7 +377,7 @@ void loop() {
 
         if(state == RADIOLIB_ERR_NETWORK_NOT_JOINED) {
           gLoRaJoined = false;
-          gLastJoinAttemptMs = 0;
+          gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;
           gSchedulerState = SCHED_WAIT_FOR_JOIN;
           Serial.println(F("[LoRaWAN] Session lost. Will retry join."));
           return;

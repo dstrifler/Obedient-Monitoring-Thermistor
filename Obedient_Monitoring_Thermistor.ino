@@ -168,6 +168,16 @@ static bool applyDownlinkCommand(const DownlinkCommand& cmd) {
   return changed;
 }
 
+static void printBoundedTextPayload(const uint8_t* buffer, size_t len) {
+  if(buffer == nullptr || len == 0) {
+    return;
+  }
+
+  for(size_t i = 0; i < len; i++) {
+    Serial.write(buffer[i]);
+  }
+}
+
 static void printUplinkPayload(const uint8_t* buffer, size_t len, uint8_t payloadMode) {
   if(buffer == nullptr || len == 0) {
     Serial.println(F("[Payload] Empty payload"));
@@ -188,7 +198,8 @@ static void printUplinkPayload(const uint8_t* buffer, size_t len, uint8_t payloa
     Serial.println();
   } else {
     Serial.print(F("[Payload] TEXT: "));
-    Serial.println((const char*)buffer);
+    printBoundedTextPayload(buffer, len);
+    Serial.println();
   }
 }
 

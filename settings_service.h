@@ -48,6 +48,21 @@ struct AppSettings {
   uint16_t checksum;
 };
 
+// EEPROM contract note:
+// - SETTINGS_VERSION should be incremented when AppSettings layout changes.
+// - Keep AppSettings within EEPROM_SETTINGS_RESERVED_BYTES, or increase the
+//   reservation in eeprom_service.h before shipping the new firmware.
+#if defined(__cplusplus)
+static_assert(
+  sizeof(AppSettings) <= EEPROM_SETTINGS_RESERVED_BYTES,
+  "AppSettings exceeded reserved EEPROM space; update AppSettings size or EEPROM_SETTINGS_RESERVED_BYTES."
+);
+#else
+#if (sizeof(AppSettings) > EEPROM_SETTINGS_RESERVED_BYTES)
+  #error "AppSettings exceeded reserved EEPROM space; update AppSettings size or EEPROM_SETTINGS_RESERVED_BYTES."
+#endif
+#endif
+
 static AppSettings gSettings;
 
 // ============================================================

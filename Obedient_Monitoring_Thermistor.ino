@@ -15,6 +15,7 @@ static uint32_t gLastReportMs = 0;
 static uint32_t gLastJoinAttemptMs = 0;
 static bool gLoRaJoined = false;
 static uint32_t gPeriodicitySeconds = DEFAULT_UPLINK_INTERVAL_SECONDS;
+static uint32_t gPeriodicityMs = DEFAULT_UPLINK_INTERVAL_SECONDS * 1000UL;
 
 static const uint32_t JOIN_RETRY_MS = 60000UL;
 static const uint32_t LOOP_SLICE_MS = 50UL;
@@ -97,6 +98,7 @@ static void printCurrentSettings() {
 static void syncPeriodicityFromSettings() {
   AppSettings* s = settingsGet();
   gPeriodicitySeconds = (uint32_t)s->reportIntervalMin * 60UL;
+  gPeriodicityMs = gPeriodicitySeconds * 1000UL;
 }
 
 static bool applyDownlinkCommand(const DownlinkCommand& cmd) {
@@ -214,7 +216,7 @@ static bool ensureJoined() {
 
   if(gLoRaJoined) {
     syncPeriodicityFromSettings();
-    gLastReportMs = millis() - (gPeriodicitySeconds * 1000UL);
+    gLastReportMs = millis() - gPeriodicityMs;
     Serial.println(F("[LoRaWAN] Join successful."));
     return true;
   }
@@ -257,7 +259,7 @@ void setup() {
 
   gLoRaJoined = false;
   gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;
-  gLastReportMs = millis() - (gPeriodicitySeconds * 1000UL);
+  gLastReportMs = millis() - gPeriodicityMs;
   gNextSchedulerTickMs = 0;
   gSchedulerState = SCHED_WAIT_FOR_JOIN;
 
@@ -276,9 +278,6 @@ void loop() {
   gNextSchedulerTickMs = now + LOOP_SLICE_MS;
 
   AppSettings* settings = settingsGet();
-
-  syncPeriodicityFromSettings();
-  uint32_t intervalMs = gPeriodicitySeconds * 1000UL;
 
   switch(gSchedulerState) {
     case SCHED_WAIT_FOR_JOIN:
@@ -301,7 +300,7 @@ void loop() {
         return;
       }
 
-      if((now - gLastReportMs) < intervalMs) {
+      if((now - gLastReportMs) < gPeriodicityMs) {
         return;
       }
 

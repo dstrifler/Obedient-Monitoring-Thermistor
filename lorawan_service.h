@@ -133,12 +133,13 @@ int16_t lwRestore() {
     gRadio.standby();
     EEPROM.get(EEPROM_LORAWAN_NONCES_ADDR, gLWnonces);
     state = gNode.setBufferNonces(gLWnonces);
+    bool nonceBufferLoaded = (state == RADIOLIB_ERR_NONE);
 
-    if(state == RADIOLIB_ERR_NONE) {
-      Serial.println(F("[LoRaWAN] Nonce buffer restored successfully."));
+    if(nonceBufferLoaded) {
+      Serial.println(F("[LoRaWAN] Nonce buffer load accepted (RADIOLIB_ERR_NONE)."));
     } else {
       lwInvalidatePersistedNonces(true);
-      Serial.print(F("[LoRaWAN] Restore data rejected/invalidated (state "));
+      Serial.print(F("[LoRaWAN] Nonce buffer load failed (error state "));
       Serial.print(state);
       Serial.println(F("). Invalidated persisted nonces; a fresh session will be created."));
     }

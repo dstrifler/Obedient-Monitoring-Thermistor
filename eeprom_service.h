@@ -42,6 +42,6 @@
 #endif
 
 #define SETTINGS_MAGIC                0x47534150UL   // "GSAP"
-#define SETTINGS_VERSION              1
+#define SETTINGS_VERSION              2
 
 #endif

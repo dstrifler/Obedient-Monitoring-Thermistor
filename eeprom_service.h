@@ -1,5 +1,5 @@
-#ifndef _EEPROM_LAYOUT_H
-#define _EEPROM_LAYOUT_H
+#ifndef _EEPROM_SERVICE_H
+#define _EEPROM_SERVICE_H
 
 #include <Arduino.h>
 #include <RadioLib.h>

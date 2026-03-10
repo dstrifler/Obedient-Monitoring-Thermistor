@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "config.h"
-#include "eeprom_layout.h"
+#include "eeprom_service.h"
 
 #ifndef LORAWAN_UPLINK_FPORT
 #define LORAWAN_UPLINK_FPORT 1

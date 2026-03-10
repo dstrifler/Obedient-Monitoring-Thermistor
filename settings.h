@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <EEPROM.h>
 #include "config.h"
-#include "eeprom_layout.h"
+#include "eeprom_service.h"
 
 // ============================================================
 // ENUMS

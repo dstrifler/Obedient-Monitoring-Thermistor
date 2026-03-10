@@ -220,27 +220,40 @@ static size_t payloadAppend(char* buffer, size_t maxLen, size_t idx, const char*
   return idx;
 }
 
-static size_t payloadAppendFormat(char* buffer, size_t maxLen, size_t idx, const char* fmt, ...) {
+struct PayloadAppendFormatResult {
+  size_t idx;
+  bool truncated;
+  bool writeError;
+};
+
+static PayloadAppendFormatResult payloadAppendFormat(char* buffer, size_t maxLen, size_t idx, const char* fmt, ...) {
+  PayloadAppendFormatResult result = {idx, false, false};
+
   if(buffer == nullptr || fmt == nullptr || maxLen == 0 || idx >= maxLen) {
-    return idx;
+    return result;
   }
+
+  size_t remainingCapacity = maxLen - idx;
 
   va_list args;
   va_start(args, fmt);
-  int written = vsnprintf(&buffer[idx], maxLen - idx, fmt, args);
+  int written = vsnprintf(&buffer[idx], remainingCapacity, fmt, args);
   va_end(args);
 
   if(written < 0) {
-    return idx;
+    result.writeError = true;
+    return result;
   }
 
-  size_t newIdx = idx + (size_t)written;
-  if(newIdx >= maxLen) {
+  result.truncated = ((size_t)written >= remainingCapacity);
+  if(result.truncated) {
     buffer[maxLen - 1] = '\0';
-    return maxLen - 1;
+    result.idx = maxLen - 1;
+    return result;
   }
 
-  return newIdx;
+  result.idx = idx + (size_t)written;
+  return result;
 }
 
 // ============================================================
@@ -263,14 +276,16 @@ static size_t payloadEncodeCompactJson(
   bool truncated = false;
 
   out[0] = '\0';
+
+  size_t prevIdx = idx;
   idx = payloadAppend(out, maxLen, idx, "{");
-  if(idx == (maxLen - 1)) {
+  if(idx == prevIdx) {
     truncated = true;
   }
 
   if(settings->tempEnabled) {
     float tempOut = payloadTempForOutput(data->temperatureC, settings->tempUnit);
-    idx = payloadAppendFormat(
+    PayloadAppendFormatResult appendResult = payloadAppendFormat(
       out,
       maxLen,
       idx,
@@ -279,14 +294,13 @@ static size_t payloadEncodeCompactJson(
       tempOut,
       payloadTempUnitLabel(settings->tempUnit)
     );
-    if(idx == (maxLen - 1)) {
-      truncated = true;
-    }
+    idx = appendResult.idx;
+    truncated = truncated || appendResult.truncated || appendResult.writeError;
     first = false;
   }
 
   if(settings->humidityEnabled) {
-    idx = payloadAppendFormat(
+    PayloadAppendFormatResult appendResult = payloadAppendFormat(
       out,
       maxLen,
       idx,
@@ -294,9 +308,8 @@ static size_t payloadEncodeCompactJson(
       first ? "" : ",",
       data->humidityPct
     );
-    if(idx == (maxLen - 1)) {
-      truncated = true;
-    }
+    idx = appendResult.idx;
+    truncated = truncated || appendResult.truncated || appendResult.writeError;
     first = false;
   }
 
@@ -304,7 +317,7 @@ static size_t payloadEncodeCompactJson(
     float pressureOut = payloadPressureForOutput(data->pressurePa, settings->pressureUnit);
     int precision = (settings->pressureUnit == PRESSURE_UNIT_INHG) ? 3 : 2;
 
-    idx = payloadAppendFormat(
+    PayloadAppendFormatResult appendResult = payloadAppendFormat(
       out,
       maxLen,
       idx,
@@ -314,14 +327,13 @@ static size_t payloadEncodeCompactJson(
       pressureOut,
       payloadPressureUnitLabel(settings->pressureUnit)
     );
-    if(idx == (maxLen - 1)) {
-      truncated = true;
-    }
+    idx = appendResult.idx;
+    truncated = truncated || appendResult.truncated || appendResult.writeError;
     first = false;
   }
 
   if(settings->gasEnabled) {
-    idx = payloadAppendFormat(
+    PayloadAppendFormatResult appendResult = payloadAppendFormat(
       out,
       maxLen,
       idx,
@@ -329,18 +341,16 @@ static size_t payloadEncodeCompactJson(
       first ? "" : ",",
       (unsigned long)data->gasOhms
     );
-    if(idx == (maxLen - 1)) {
-      truncated = true;
-    }
+    idx = appendResult.idx;
+    truncated = truncated || appendResult.truncated || appendResult.writeError;
     first = false;
   }
 
+  prevIdx = idx;
   idx = payloadAppend(out, maxLen, idx, "}");
-  if(idx == 0 || out[idx - 1] != '}') {
-    truncated = true;
-  }
+  bool closingBraceWritten = (idx > prevIdx) && (out[idx - 1] == '}');
 
-  if(truncated) {
+  if(truncated || !closingBraceWritten) {
     return 0;
   }
 

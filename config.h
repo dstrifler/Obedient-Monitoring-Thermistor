@@ -12,7 +12,34 @@
 #define SERIAL_BAUD_RATE 115200
 
 // ============================================================
-// LORAWAN STATIC CONFIG FORM
+// LORA DETAILS FORM
+// Fill these values per deployment/board.
+// ============================================================
+
+#define LORA_BAND              US915
+#define LORA_SUB_BAND          2
+#define LORA_VERSION           0   // 0 = LoRaWAN 1.0.x, 1 = LoRaWAN 1.1.x
+#define LORA_USE_OTAA          1   // 1 = OTAA, 0 = ABP
+#define LORA_UPLINK_FPORT      1
+
+// OTAA keys (fillable form)
+#define LORA_JOIN_EUI          0x6081F9C63C1474C3
+#define LORA_DEV_EUI           0x6081F9A7215ECB6C
+#define LORA_NWK_KEY           \
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+#define LORA_APP_KEY           \
+  0x1D, 0x4D, 0x81, 0x2C, 0xE7, 0x6D, 0xED, 0x85, \
+  0x06, 0x26, 0x39, 0x9C, 0xB1, 0x9E, 0xAF, 0x58
+
+// LoRaWAN reserves FPort 0 for MAC commands.
+// Application payload must use ports 1..223.
+#if (LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)
+#error "LORA_UPLINK_FPORT must be in range 1..223 (0 is reserved by LoRaWAN MAC)."
+#endif
+
+// ============================================================
+// RADIO DETAILS FORM
 // Fill these values per deployment/board.
 // ============================================================
 
@@ -24,20 +51,8 @@
 #define LORA_USE_SPI           1
 #define LORA_SPI_BUS           SPI1
 
-#define LORA_BAND              US915
-#define LORA_SUB_BAND          2
-#define LORA_VERSION           0   // 0 = LoRaWAN 1.0.x, 1 = LoRaWAN 1.1.x
-#define LORA_USE_OTAA          1   // 1 = OTAA, 0 = ABP
-#define LORA_UPLINK_FPORT      1
-
-// LoRaWAN reserves FPort 0 for MAC commands.
-// Application payload must use ports 1..223.
-#if (LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)
-#error "LORA_UPLINK_FPORT must be in range 1..223 (0 is reserved by LoRaWAN MAC)."
-#endif
-
 // ============================================================
-// SENSOR STATIC CONFIG FORM
+// SENSOR DETAILS FORM
 // Fill these values per deployment/board.
 // ============================================================
 

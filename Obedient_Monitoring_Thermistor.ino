@@ -23,7 +23,8 @@ static const uint32_t LOOP_SLICE_MS = 50UL;
 enum SchedulerState : uint8_t {
   SCHED_WAIT_FOR_JOIN = 0,
   SCHED_WAIT_FOR_REPORT,
-  SCHED_READ_SENSOR,
+  SCHED_TRIGGER_SENSOR,
+  SCHED_FETCH_SENSOR,
   SCHED_BUILD_PAYLOAD,
   SCHED_SEND_UPLINK,
   SCHED_PROCESS_DOWNLINK
@@ -36,6 +37,7 @@ static size_t gPendingUplinkLen = 0;
 static uint8_t gPendingDownlinkBuffer[255];
 static size_t gPendingDownlinkLen = 0;
 static uint32_t gNextSchedulerTickMs = 0;
+static uint32_t gSensorTriggerMs = 0;
 
 // ============================================================
 // HELPERS
@@ -304,12 +306,27 @@ void loop() {
         return;
       }
 
-      gSchedulerState = SCHED_READ_SENSOR;
+      gSchedulerState = SCHED_TRIGGER_SENSOR;
       break;
 
-    case SCHED_READ_SENSOR:
+    case SCHED_TRIGGER_SENSOR:
+      if(!sensorTrigger()) {
+        Serial.println(F("[Sensor] Trigger failed."));
+        gSchedulerState = SCHED_WAIT_FOR_REPORT;
+        return;
+      }
+
+      gSensorTriggerMs = now;
+      gSchedulerState = SCHED_FETCH_SENSOR;
+      break;
+
+    case SCHED_FETCH_SENSOR:
+      if((now - gSensorTriggerMs) < SENSOR_FORCED_DELAY_MS) {
+        return;
+      }
+
       memset(&gPendingSensorData, 0, sizeof(gPendingSensorData));
-      if(!sensorRead(&gPendingSensorData)) {
+      if(!sensorFetch(&gPendingSensorData)) {
         Serial.println(F("[Sensor] Read failed."));
         gSchedulerState = SCHED_WAIT_FOR_REPORT;
         return;

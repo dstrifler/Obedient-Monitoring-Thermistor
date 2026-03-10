@@ -455,46 +455,23 @@ DownlinkCommand payloadDecodeDownlink(const uint8_t* buffer, size_t len) {
       break;
 
     case CMD_SET_TEMP_UNIT:
-      cmd.valid = (cmd.value == TEMP_UNIT_C || cmd.value == TEMP_UNIT_F);
+      // Settings validators are the authoritative source for accepted values.
+      cmd.valid = settingsIsValidTempUnit(cmd.value);
       break;
 
     case CMD_SET_PRESSURE_UNIT:
-      cmd.valid = (
-        cmd.value == PRESSURE_UNIT_HPA ||
-        cmd.value == PRESSURE_UNIT_INHG ||
-        cmd.value == PRESSURE_UNIT_PA
-      );
+      // Settings validators are the authoritative source for accepted values.
+      cmd.valid = settingsIsValidPressureUnit(cmd.value);
       break;
 
     case CMD_SET_REPORT_INTERVAL:
-      switch(cmd.value) {
-        case 5:
-        case 10:
-        case 15:
-        case 20:
-        case 25:
-        case 30:
-        case 35:
-        case 40:
-        case 45:
-        case 50:
-        case 55:
-        case 60:
-          cmd.valid = true;
-          break;
-
-        default:
-          cmd.valid = false;
-          break;
-      }
+      // Settings validators are the authoritative source for accepted values.
+      cmd.valid = settingsIsValidReportInterval(cmd.value);
       break;
 
     case CMD_SET_PAYLOAD_MODE:
-      cmd.valid = (
-        cmd.value == PAYLOAD_MODE_COMPACT_BIN ||
-        cmd.value == PAYLOAD_MODE_COMPACT_JSON ||
-        cmd.value == PAYLOAD_MODE_VERBOSE_DEBUG
-      );
+      // Settings validators are the authoritative source for accepted values.
+      cmd.valid = settingsIsValidPayloadMode(cmd.value);
       break;
 
     case CMD_RESET_SETTINGS:

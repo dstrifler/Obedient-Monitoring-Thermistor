@@ -91,6 +91,26 @@ static bool settingsIsValidInterval(uint8_t minutes)
   }
 }
 
+bool settingsIsValidReportInterval(uint8_t minutes)
+{
+  return settingsIsValidInterval(minutes);
+}
+
+bool settingsIsValidTempUnit(uint8_t unit)
+{
+  return (unit <= TEMP_UNIT_F);
+}
+
+bool settingsIsValidPressureUnit(uint8_t unit)
+{
+  return (unit <= PRESSURE_UNIT_PA);
+}
+
+bool settingsIsValidPayloadMode(uint8_t mode)
+{
+  return (mode <= PAYLOAD_MODE_VERBOSE_DEBUG);
+}
+
 static bool settingsValidate(const AppSettings* s)
 {
   if(s->magic != SETTINGS_MAGIC) return false;
@@ -101,11 +121,11 @@ static bool settingsValidate(const AppSettings* s)
   if(s->pressureEnabled > 1) return false;
   if(s->gasEnabled > 1) return false;
 
-  if(s->tempUnit > TEMP_UNIT_F) return false;
-  if(s->pressureUnit > PRESSURE_UNIT_PA) return false;
-  if(s->payloadMode > PAYLOAD_MODE_VERBOSE_DEBUG) return false;
+  if(!settingsIsValidTempUnit(s->tempUnit)) return false;
+  if(!settingsIsValidPressureUnit(s->pressureUnit)) return false;
+  if(!settingsIsValidPayloadMode(s->payloadMode)) return false;
 
-  if(!settingsIsValidInterval(s->reportIntervalMin)) return false;
+  if(!settingsIsValidReportInterval(s->reportIntervalMin)) return false;
 
   if(s->checksum != settingsChecksum(s)) return false;
 
@@ -212,7 +232,7 @@ bool settingsSetGasEnabled(bool enabled)
 
 bool settingsSetTempUnit(uint8_t unit)
 {
-  if(unit > TEMP_UNIT_F) return false;
+  if(!settingsIsValidTempUnit(unit)) return false;
   bool changed = (gSettings.tempUnit != unit);
   gSettings.tempUnit = unit;
   return changed;
@@ -220,7 +240,7 @@ bool settingsSetTempUnit(uint8_t unit)
 
 bool settingsSetPressureUnit(uint8_t unit)
 {
-  if(unit > PRESSURE_UNIT_PA) return false;
+  if(!settingsIsValidPressureUnit(unit)) return false;
   bool changed = (gSettings.pressureUnit != unit);
   gSettings.pressureUnit = unit;
   return changed;
@@ -228,7 +248,7 @@ bool settingsSetPressureUnit(uint8_t unit)
 
 bool settingsSetPayloadMode(uint8_t mode)
 {
-  if(mode > PAYLOAD_MODE_VERBOSE_DEBUG) return false;
+  if(!settingsIsValidPayloadMode(mode)) return false;
   bool changed = (gSettings.payloadMode != mode);
   gSettings.payloadMode = mode;
   return changed;
@@ -236,7 +256,7 @@ bool settingsSetPayloadMode(uint8_t mode)
 
 bool settingsSetReportInterval(uint8_t minutes)
 {
-  if(!settingsIsValidInterval(minutes)) return false;
+  if(!settingsIsValidReportInterval(minutes)) return false;
   bool changed = (gSettings.reportIntervalMin != minutes);
   gSettings.reportIntervalMin = minutes;
   return changed;

@@ -1,5 +1,5 @@
-#ifndef _CODEC_SERVICE_H
-#define _CODEC_SERVICE_H
+#ifndef _PAYLOAD_SERVICE_H
+#define _PAYLOAD_SERVICE_H
 
 #include <Arduino.h>
 #include <stdio.h>

@@ -4,7 +4,7 @@
 #include "eeprom_service.h"
 #include "settings_service.h"
 #include "sensor_service.h"
-#include "codec_service.h"
+#include "payload_service.h"
 #include "lorawan_service.h"
 
 // ============================================================

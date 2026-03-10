@@ -14,6 +14,7 @@
 static uint32_t gLastReportMs = 0;
 static uint32_t gLastJoinAttemptMs = 0;
 static bool gLoRaJoined = false;
+static uint32_t gPeriodicitySeconds = DEFAULT_UPLINK_INTERVAL_SECONDS;
 
 static const uint32_t JOIN_RETRY_MS = 60000UL;
 
@@ -77,7 +78,7 @@ static void printCurrentSettings() {
 
 static void syncPeriodicityFromSettings() {
   AppSettings* s = settingsGet();
-  periodicity = (uint32_t)s->reportIntervalMin * 60UL;
+  gPeriodicitySeconds = (uint32_t)s->reportIntervalMin * 60UL;
 }
 
 static bool applyDownlinkCommand(const DownlinkCommand& cmd) {
@@ -155,7 +156,13 @@ static void printUplinkPayload(const uint8_t* buffer, size_t len, uint8_t payloa
 
   if(payloadMode == PAYLOAD_MODE_COMPACT_BIN) {
     Serial.print(F("[Payload] HEX: "));
-    arrayDump((uint8_t*)buffer, len);
+    for(size_t i = 0; i < len; i++) {
+      if(buffer[i] < 0x10) {
+        Serial.print('0');
+      }
+      Serial.print(buffer[i], HEX);
+    }
+    Serial.println();
   } else {
     Serial.print(F("[Payload] TEXT: "));
     Serial.println((const char*)buffer);
@@ -167,11 +174,17 @@ static void printDownlinkPayload(const uint8_t* buffer, size_t len) {
   Serial.println(len);
 
   Serial.print(F("[Downlink] HEX: "));
-  arrayDump((uint8_t*)buffer, len);
+  for(size_t i = 0; i < len; i++) {
+    if(buffer[i] < 0x10) {
+      Serial.print('0');
+    }
+    Serial.print(buffer[i], HEX);
+  }
+  Serial.println();
 }
 
 static bool ensureJoined() {
-  gLoRaJoined = node.isActivated();
+  gLoRaJoined = lwIsActivated();
   if(gLoRaJoined) {
     return true;
   }
@@ -179,11 +192,11 @@ static bool ensureJoined() {
   Serial.println(F("[LoRaWAN] Not joined. Trying to join..."));
 
   gLoRaJoined = lwActivate();
-  gLoRaJoined = gLoRaJoined && node.isActivated();
+  gLoRaJoined = gLoRaJoined && lwIsActivated();
 
   if(gLoRaJoined) {
     syncPeriodicityFromSettings();
-    gLastReportMs = millis() - (periodicity * 1000UL);
+    gLastReportMs = millis() - (gPeriodicitySeconds * 1000UL);
     Serial.println(F("[LoRaWAN] Join successful."));
     return true;
   }
@@ -213,17 +226,6 @@ void setup() {
     Serial.println(F("[Sensor] BME68x initialized."));
   }
 
-  Serial.print(F("[LoRaWAN] Initialise the radio ... "));
-  int16_t radioState = radio.begin();
-  if(radioState != RADIOLIB_ERR_NONE) {
-    Serial.print(F("failed, code "));
-    Serial.println(radioState);
-    while(true) {
-      delay(1000);
-    }
-  }
-  Serial.println(F("success!"));
-
   if(!lwBegin()) {
     Serial.println(F("[LoRaWAN] Begin failed."));
     while(true) {
@@ -237,10 +239,10 @@ void setup() {
 
   gLoRaJoined = false;
   gLastJoinAttemptMs = 0;
-  gLastReportMs = millis() - (periodicity * 1000UL);
+  gLastReportMs = millis() - (gPeriodicitySeconds * 1000UL);
 
   gLoRaJoined = lwActivate();
-  gLoRaJoined = gLoRaJoined && node.isActivated();
+  gLoRaJoined = gLoRaJoined && lwIsActivated();
   if(gLoRaJoined) {
     Serial.println(F("[LoRaWAN] Initial join successful."));
   } else {
@@ -258,12 +260,12 @@ void loop() {
   syncPeriodicityFromSettings();
 
   uint32_t now = millis();
-  uint32_t intervalMs = periodicity * 1000UL;
+  uint32_t intervalMs = gPeriodicitySeconds * 1000UL;
 
   // ------------------------------------------------------------
   // JOIN MANAGEMENT
   // ------------------------------------------------------------
-  gLoRaJoined = node.isActivated();
+  gLoRaJoined = lwIsActivated();
   if(!gLoRaJoined) {
     if((now - gLastJoinAttemptMs) >= JOIN_RETRY_MS) {
       gLastJoinAttemptMs = now;

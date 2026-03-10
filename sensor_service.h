@@ -19,16 +19,16 @@ static bool gSensorPresent = false;
 bool sensorBegin() {
 #if defined(SENSOR_USE_WIRE1) && (SENSOR_USE_WIRE1 == 1)
   Wire1.begin();
-  gBme.begin(BME68X_I2C_ADDR, Wire1);
+  gBme.begin(SENSOR_I2C_ADDR, Wire1);
 #else
   Wire.begin();
-  gBme.begin(BME68X_I2C_ADDR, Wire);
+  gBme.begin(SENSOR_I2C_ADDR, Wire);
 #endif
 
   gBme.setTPH();
   gBme.setHeaterProf(300, 100);
   gBme.setOpMode(BME68X_FORCED_MODE);
-  delay(BME68X_FORCED_DELAY_MS);
+  delay(SENSOR_FORCED_DELAY_MS);
 
   if(!gBme.fetchData()) {
     gSensorPresent = false;
@@ -57,7 +57,7 @@ bool sensorRead(SensorData* data) {
   }
 
   gBme.setOpMode(BME68X_FORCED_MODE);
-  delay(BME68X_FORCED_DELAY_MS);
+  delay(SENSOR_FORCED_DELAY_MS);
 
   if(!gBme.fetchData()) {
     gSensorPresent = false;

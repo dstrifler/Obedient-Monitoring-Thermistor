@@ -1,5 +1,5 @@
-#ifndef _LORAWAN_H
-#define _LORAWAN_H
+#ifndef _LORAWAN_SERVICE_H
+#define _LORAWAN_SERVICE_H
 
 #include <Arduino.h>
 #include <RadioLib.h>

@@ -1,5 +1,5 @@
-#ifndef _PAYLOAD_H
-#define _PAYLOAD_H
+#ifndef _CODEC_SERVICE_H
+#define _CODEC_SERVICE_H
 
 #include <Arduino.h>
 #include <stdio.h>
@@ -7,7 +7,7 @@
 #include <stdarg.h>
 #include <math.h>
 
-#include "sensor.h"
+#include "sensor_service.h"
 #include "settings.h"
 
 // ============================================================

@@ -1,5 +1,5 @@
-#ifndef _SENSOR_H
-#define _SENSOR_H
+#ifndef _SENSOR_SERVICE_H
+#define _SENSOR_SERVICE_H
 
 #include <Arduino.h>
 #include <Wire.h>

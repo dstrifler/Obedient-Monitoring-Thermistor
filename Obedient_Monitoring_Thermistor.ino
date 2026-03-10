@@ -271,6 +271,10 @@ void setup() {
 // ============================================================
 // LOOP
 // ============================================================
+// Preferred sensor acquisition path is non-blocking in scheduler runtime:
+// 1) SCHED_TRIGGER_SENSOR calls sensorTrigger() to start forced conversion.
+// 2) SCHED_FETCH_SENSOR waits SENSOR_FORCED_DELAY_MS then calls sensorFetch().
+// Avoid using blocking compatibility paths in scheduler-driven execution.
 
 void loop() {
   uint32_t now = millis();

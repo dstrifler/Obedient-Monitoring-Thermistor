@@ -256,18 +256,12 @@ void setup() {
   Serial.println(restoreState);
 
   gLoRaJoined = false;
-  gLastJoinAttemptMs = 0;
+  gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;
   gLastReportMs = millis() - (gPeriodicitySeconds * 1000UL);
   gNextSchedulerTickMs = 0;
   gSchedulerState = SCHED_WAIT_FOR_JOIN;
 
-  gLoRaJoined = lwActivate();
-  gLoRaJoined = gLoRaJoined && lwIsActivated();
-  if(gLoRaJoined) {
-    Serial.println(F("[LoRaWAN] Initial join successful."));
-  } else {
-    Serial.println(F("[LoRaWAN] Initial join failed; will retry."));
-  }
+  Serial.println(F("[LoRaWAN] Join deferred to scheduler."));
 }
 
 // ============================================================

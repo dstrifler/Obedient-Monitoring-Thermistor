@@ -49,7 +49,7 @@ struct AppSettings {
 };
 
 // EEPROM contract note:
-// - SETTINGS_VERSION should be incremented when AppSettings layout changes.
+// - SETTINGS_VERSION should be incremented when persisted layout or checksum semantics change.
 // - Keep AppSettings within EEPROM_SETTINGS_RESERVED_BYTES, or increase the
 //   reservation in eeprom_service.h before shipping the new firmware.
 #if defined(__cplusplus)
@@ -66,17 +66,87 @@ static_assert(
 static AppSettings gSettings;
 
 // ============================================================
-// CHECKSUM
+// CHECKSUM / SERIALIZATION
 // ============================================================
+
+struct AppSettingsPersisted {
+  uint32_t magic;
+  uint8_t version;
+
+  uint8_t tempEnabled;
+  uint8_t humidityEnabled;
+  uint8_t pressureEnabled;
+  uint8_t gasEnabled;
+
+  uint8_t tempUnit;
+  uint8_t pressureUnit;
+  uint8_t payloadMode;
+  uint8_t reportIntervalMin;
+
+  uint16_t checksum;
+};
+
+#if defined(__cplusplus)
+static_assert(
+  sizeof(AppSettingsPersisted) <= EEPROM_SETTINGS_RESERVED_BYTES,
+  "AppSettingsPersisted exceeded reserved EEPROM space; update persisted settings size or EEPROM_SETTINGS_RESERVED_BYTES."
+);
+#else
+#if (sizeof(AppSettingsPersisted) > EEPROM_SETTINGS_RESERVED_BYTES)
+  #error "AppSettingsPersisted exceeded reserved EEPROM space; update persisted settings size or EEPROM_SETTINGS_RESERVED_BYTES."
+#endif
+#endif
+
+static void settingsBuildPersisted(AppSettingsPersisted* out, const AppSettings* in)
+{
+  out->magic = in->magic;
+  out->version = in->version;
+  out->tempEnabled = in->tempEnabled;
+  out->humidityEnabled = in->humidityEnabled;
+  out->pressureEnabled = in->pressureEnabled;
+  out->gasEnabled = in->gasEnabled;
+  out->tempUnit = in->tempUnit;
+  out->pressureUnit = in->pressureUnit;
+  out->payloadMode = in->payloadMode;
+  out->reportIntervalMin = in->reportIntervalMin;
+  out->checksum = in->checksum;
+}
+
+static void settingsApplyPersisted(AppSettings* out, const AppSettingsPersisted* in)
+{
+  out->magic = in->magic;
+  out->version = in->version;
+  out->tempEnabled = in->tempEnabled;
+  out->humidityEnabled = in->humidityEnabled;
+  out->pressureEnabled = in->pressureEnabled;
+  out->gasEnabled = in->gasEnabled;
+  out->tempUnit = in->tempUnit;
+  out->pressureUnit = in->pressureUnit;
+  out->payloadMode = in->payloadMode;
+  out->reportIntervalMin = in->reportIntervalMin;
+  out->checksum = in->checksum;
+}
 
 static uint16_t settingsChecksum(const AppSettings* s)
 {
-  const uint8_t* p = (const uint8_t*)s;
   uint16_t sum = 0;
 
-  for(size_t i = 0; i < (sizeof(AppSettings) - sizeof(s->checksum)); i++) {
-    sum += p[i];
-  }
+  sum += (uint16_t)(s->magic & 0xFF);
+  sum += (uint16_t)((s->magic >> 8) & 0xFF);
+  sum += (uint16_t)((s->magic >> 16) & 0xFF);
+  sum += (uint16_t)((s->magic >> 24) & 0xFF);
+
+  sum += s->version;
+
+  sum += s->tempEnabled;
+  sum += s->humidityEnabled;
+  sum += s->pressureEnabled;
+  sum += s->gasEnabled;
+
+  sum += s->tempUnit;
+  sum += s->pressureUnit;
+  sum += s->payloadMode;
+  sum += s->reportIntervalMin;
 
   return sum;
 }
@@ -178,13 +248,19 @@ void settingsResetDefaults()
 
 void settingsSave()
 {
+  AppSettingsPersisted persisted;
+
   gSettings.checksum = settingsChecksum(&gSettings);
-  EEPROM.put(EEPROM_ADDR_SETTINGS_BASE, gSettings);
+  settingsBuildPersisted(&persisted, &gSettings);
+  EEPROM.put(EEPROM_ADDR_SETTINGS_BASE, persisted);
 }
 
 void settingsLoad()
 {
-  EEPROM.get(EEPROM_ADDR_SETTINGS_BASE, gSettings);
+  AppSettingsPersisted persisted;
+
+  EEPROM.get(EEPROM_ADDR_SETTINGS_BASE, persisted);
+  settingsApplyPersisted(&gSettings, &persisted);
 
   if(!settingsValidate(&gSettings)) {
     settingsResetDefaults();

@@ -49,7 +49,7 @@ struct AppSettings {
 };
 
 // EEPROM contract note:
-// - SETTINGS_VERSION should be incremented when persisted layout or checksum semantics change.
+// - SETTINGS_VERSION should be incremented when serialized layout or checksum semantics change.
 // - Keep AppSettings within EEPROM_SETTINGS_RESERVED_BYTES, or increase the
 //   reservation in eeprom_service.h before shipping the new firmware.
 #if defined(__cplusplus)
@@ -69,62 +69,93 @@ static AppSettings gSettings;
 // CHECKSUM / SERIALIZATION
 // ============================================================
 
-struct AppSettingsPersisted {
-  uint32_t magic;
-  uint8_t version;
-
-  uint8_t tempEnabled;
-  uint8_t humidityEnabled;
-  uint8_t pressureEnabled;
-  uint8_t gasEnabled;
-
-  uint8_t tempUnit;
-  uint8_t pressureUnit;
-  uint8_t payloadMode;
-  uint8_t reportIntervalMin;
-
-  uint16_t checksum;
+enum SettingsPersistedOffset : size_t {
+  SETTINGS_PERSISTED_MAGIC = 0,
+  SETTINGS_PERSISTED_VERSION = 4,
+  SETTINGS_PERSISTED_TEMP_ENABLED = 5,
+  SETTINGS_PERSISTED_HUMIDITY_ENABLED = 6,
+  SETTINGS_PERSISTED_PRESSURE_ENABLED = 7,
+  SETTINGS_PERSISTED_GAS_ENABLED = 8,
+  SETTINGS_PERSISTED_TEMP_UNIT = 9,
+  SETTINGS_PERSISTED_PRESSURE_UNIT = 10,
+  SETTINGS_PERSISTED_PAYLOAD_MODE = 11,
+  SETTINGS_PERSISTED_REPORT_INTERVAL_MIN = 12,
+  SETTINGS_PERSISTED_CHECKSUM = 13,
+  SETTINGS_PERSISTED_BYTES = 15
 };
 
 #if defined(__cplusplus)
 static_assert(
-  sizeof(AppSettingsPersisted) <= EEPROM_SETTINGS_RESERVED_BYTES,
-  "AppSettingsPersisted exceeded reserved EEPROM space; update persisted settings size or EEPROM_SETTINGS_RESERVED_BYTES."
+  SETTINGS_PERSISTED_BYTES <= EEPROM_SETTINGS_RESERVED_BYTES,
+  "Persisted settings schema exceeded reserved EEPROM space; update schema size or EEPROM_SETTINGS_RESERVED_BYTES."
 );
 #else
-#if (sizeof(AppSettingsPersisted) > EEPROM_SETTINGS_RESERVED_BYTES)
-  #error "AppSettingsPersisted exceeded reserved EEPROM space; update persisted settings size or EEPROM_SETTINGS_RESERVED_BYTES."
+#if (SETTINGS_PERSISTED_BYTES > EEPROM_SETTINGS_RESERVED_BYTES)
+  #error "Persisted settings schema exceeded reserved EEPROM space; update schema size or EEPROM_SETTINGS_RESERVED_BYTES."
 #endif
 #endif
 
-static void settingsBuildPersisted(AppSettingsPersisted* out, const AppSettings* in)
+static void settingsWriteU16LE(uint8_t* dst, uint16_t value)
 {
-  out->magic = in->magic;
-  out->version = in->version;
-  out->tempEnabled = in->tempEnabled;
-  out->humidityEnabled = in->humidityEnabled;
-  out->pressureEnabled = in->pressureEnabled;
-  out->gasEnabled = in->gasEnabled;
-  out->tempUnit = in->tempUnit;
-  out->pressureUnit = in->pressureUnit;
-  out->payloadMode = in->payloadMode;
-  out->reportIntervalMin = in->reportIntervalMin;
-  out->checksum = in->checksum;
+  dst[0] = (uint8_t)(value & 0xFFu);
+  dst[1] = (uint8_t)((value >> 8) & 0xFFu);
 }
 
-static void settingsApplyPersisted(AppSettings* out, const AppSettingsPersisted* in)
+static uint16_t settingsReadU16LE(const uint8_t* src)
 {
-  out->magic = in->magic;
-  out->version = in->version;
-  out->tempEnabled = in->tempEnabled;
-  out->humidityEnabled = in->humidityEnabled;
-  out->pressureEnabled = in->pressureEnabled;
-  out->gasEnabled = in->gasEnabled;
-  out->tempUnit = in->tempUnit;
-  out->pressureUnit = in->pressureUnit;
-  out->payloadMode = in->payloadMode;
-  out->reportIntervalMin = in->reportIntervalMin;
-  out->checksum = in->checksum;
+  return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+}
+
+static void settingsWriteU32LE(uint8_t* dst, uint32_t value)
+{
+  dst[0] = (uint8_t)(value & 0xFFu);
+  dst[1] = (uint8_t)((value >> 8) & 0xFFu);
+  dst[2] = (uint8_t)((value >> 16) & 0xFFu);
+  dst[3] = (uint8_t)((value >> 24) & 0xFFu);
+}
+
+static uint32_t settingsReadU32LE(const uint8_t* src)
+{
+  return (uint32_t)src[0]
+    | ((uint32_t)src[1] << 8)
+    | ((uint32_t)src[2] << 16)
+    | ((uint32_t)src[3] << 24);
+}
+
+static void settingsWritePersisted(uint8_t* dst, size_t len, const AppSettings* in)
+{
+  if((dst == nullptr) || (in == nullptr) || (len < SETTINGS_PERSISTED_BYTES)) return;
+
+  memset(dst, 0, len);
+
+  settingsWriteU32LE(dst + SETTINGS_PERSISTED_MAGIC, in->magic);
+  dst[SETTINGS_PERSISTED_VERSION] = in->version;
+  dst[SETTINGS_PERSISTED_TEMP_ENABLED] = in->tempEnabled;
+  dst[SETTINGS_PERSISTED_HUMIDITY_ENABLED] = in->humidityEnabled;
+  dst[SETTINGS_PERSISTED_PRESSURE_ENABLED] = in->pressureEnabled;
+  dst[SETTINGS_PERSISTED_GAS_ENABLED] = in->gasEnabled;
+  dst[SETTINGS_PERSISTED_TEMP_UNIT] = in->tempUnit;
+  dst[SETTINGS_PERSISTED_PRESSURE_UNIT] = in->pressureUnit;
+  dst[SETTINGS_PERSISTED_PAYLOAD_MODE] = in->payloadMode;
+  dst[SETTINGS_PERSISTED_REPORT_INTERVAL_MIN] = in->reportIntervalMin;
+  settingsWriteU16LE(dst + SETTINGS_PERSISTED_CHECKSUM, in->checksum);
+}
+
+static void settingsReadPersisted(const uint8_t* src, size_t len, AppSettings* out)
+{
+  if((src == nullptr) || (out == nullptr) || (len < SETTINGS_PERSISTED_BYTES)) return;
+
+  out->magic = settingsReadU32LE(src + SETTINGS_PERSISTED_MAGIC);
+  out->version = src[SETTINGS_PERSISTED_VERSION];
+  out->tempEnabled = src[SETTINGS_PERSISTED_TEMP_ENABLED];
+  out->humidityEnabled = src[SETTINGS_PERSISTED_HUMIDITY_ENABLED];
+  out->pressureEnabled = src[SETTINGS_PERSISTED_PRESSURE_ENABLED];
+  out->gasEnabled = src[SETTINGS_PERSISTED_GAS_ENABLED];
+  out->tempUnit = src[SETTINGS_PERSISTED_TEMP_UNIT];
+  out->pressureUnit = src[SETTINGS_PERSISTED_PRESSURE_UNIT];
+  out->payloadMode = src[SETTINGS_PERSISTED_PAYLOAD_MODE];
+  out->reportIntervalMin = src[SETTINGS_PERSISTED_REPORT_INTERVAL_MIN];
+  out->checksum = settingsReadU16LE(src + SETTINGS_PERSISTED_CHECKSUM);
 }
 
 static uint16_t settingsChecksum(const AppSettings* s)
@@ -248,19 +279,34 @@ void settingsResetDefaults()
 
 void settingsSave()
 {
-  AppSettingsPersisted persisted;
+  uint8_t persisted[SETTINGS_PERSISTED_BYTES];
 
   gSettings.checksum = settingsChecksum(&gSettings);
-  settingsBuildPersisted(&persisted, &gSettings);
-  EEPROM.put(EEPROM_ADDR_SETTINGS_BASE, persisted);
+  settingsWritePersisted(persisted, sizeof(persisted), &gSettings);
+
+  for(size_t i = 0; i < sizeof(persisted); i++) {
+    EEPROM.write(EEPROM_ADDR_SETTINGS_BASE + i, persisted[i]);
+  }
 }
 
 void settingsLoad()
 {
-  AppSettingsPersisted persisted;
+  uint8_t persisted[SETTINGS_PERSISTED_BYTES];
 
-  EEPROM.get(EEPROM_ADDR_SETTINGS_BASE, persisted);
-  settingsApplyPersisted(&gSettings, &persisted);
+  for(size_t i = 0; i < sizeof(persisted); i++) {
+    persisted[i] = EEPROM.read(EEPROM_ADDR_SETTINGS_BASE + i);
+  }
+
+  // Explicit version migration gate:
+  // if serialized schema changes, bump SETTINGS_VERSION and firmware will
+  // reset/migrate from here rather than interpreting an older layout.
+  if(persisted[SETTINGS_PERSISTED_VERSION] != SETTINGS_VERSION) {
+    settingsResetDefaults();
+    settingsSave();
+    return;
+  }
+
+  settingsReadPersisted(persisted, sizeof(persisted), &gSettings);
 
   if(!settingsValidate(&gSettings)) {
     settingsResetDefaults();

@@ -8,7 +8,7 @@
 #include <math.h>
 
 #include "sensor_service.h"
-#include "settings.h"
+#include "settings_service.h"
 
 // ============================================================
 // DOWNLINK COMMAND TYPES

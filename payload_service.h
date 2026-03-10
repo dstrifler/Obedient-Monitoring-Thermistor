@@ -260,9 +260,13 @@ static size_t payloadEncodeCompactJson(
   char* out = (char*)buffer;
   size_t idx = 0;
   bool first = true;
+  bool truncated = false;
 
   out[0] = '\0';
   idx = payloadAppend(out, maxLen, idx, "{");
+  if(idx == (maxLen - 1)) {
+    truncated = true;
+  }
 
   if(settings->tempEnabled) {
     float tempOut = payloadTempForOutput(data->temperatureC, settings->tempUnit);
@@ -275,6 +279,9 @@ static size_t payloadEncodeCompactJson(
       tempOut,
       payloadTempUnitLabel(settings->tempUnit)
     );
+    if(idx == (maxLen - 1)) {
+      truncated = true;
+    }
     first = false;
   }
 
@@ -287,6 +294,9 @@ static size_t payloadEncodeCompactJson(
       first ? "" : ",",
       data->humidityPct
     );
+    if(idx == (maxLen - 1)) {
+      truncated = true;
+    }
     first = false;
   }
 
@@ -304,6 +314,9 @@ static size_t payloadEncodeCompactJson(
       pressureOut,
       payloadPressureUnitLabel(settings->pressureUnit)
     );
+    if(idx == (maxLen - 1)) {
+      truncated = true;
+    }
     first = false;
   }
 
@@ -316,10 +329,21 @@ static size_t payloadEncodeCompactJson(
       first ? "" : ",",
       (unsigned long)data->gasOhms
     );
+    if(idx == (maxLen - 1)) {
+      truncated = true;
+    }
     first = false;
   }
 
   idx = payloadAppend(out, maxLen, idx, "}");
+  if(idx == 0 || out[idx - 1] != '}') {
+    truncated = true;
+  }
+
+  if(truncated) {
+    return 0;
+  }
+
   return strlen(out);
 }
 

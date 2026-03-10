@@ -17,6 +17,24 @@ static bool gLoRaJoined = false;
 static uint32_t gPeriodicitySeconds = DEFAULT_UPLINK_INTERVAL_SECONDS;
 
 static const uint32_t JOIN_RETRY_MS = 60000UL;
+static const uint32_t LOOP_SLICE_MS = 50UL;
+
+enum SchedulerState : uint8_t {
+  SCHED_WAIT_FOR_JOIN = 0,
+  SCHED_WAIT_FOR_REPORT,
+  SCHED_READ_SENSOR,
+  SCHED_BUILD_PAYLOAD,
+  SCHED_SEND_UPLINK,
+  SCHED_PROCESS_DOWNLINK
+};
+
+static SchedulerState gSchedulerState = SCHED_WAIT_FOR_JOIN;
+static SensorData gPendingSensorData;
+static uint8_t gPendingUplinkBuffer[255];
+static size_t gPendingUplinkLen = 0;
+static uint8_t gPendingDownlinkBuffer[255];
+static size_t gPendingDownlinkLen = 0;
+static uint32_t gNextSchedulerTickMs = 0;
 
 // ============================================================
 // HELPERS
@@ -240,6 +258,8 @@ void setup() {
   gLoRaJoined = false;
   gLastJoinAttemptMs = 0;
   gLastReportMs = millis() - (gPeriodicitySeconds * 1000UL);
+  gNextSchedulerTickMs = 0;
+  gSchedulerState = SCHED_WAIT_FOR_JOIN;
 
   gLoRaJoined = lwActivate();
   gLoRaJoined = gLoRaJoined && lwIsActivated();
@@ -255,117 +275,134 @@ void setup() {
 // ============================================================
 
 void loop() {
+  uint32_t now = millis();
+  if((int32_t)(now - gNextSchedulerTickMs) < 0) {
+    return;
+  }
+  gNextSchedulerTickMs = now + LOOP_SLICE_MS;
+
   AppSettings* settings = settingsGet();
 
   syncPeriodicityFromSettings();
-
-  uint32_t now = millis();
   uint32_t intervalMs = gPeriodicitySeconds * 1000UL;
 
-  // ------------------------------------------------------------
-  // JOIN MANAGEMENT
-  // ------------------------------------------------------------
-  gLoRaJoined = lwIsActivated();
-  if(!gLoRaJoined) {
-    if((now - gLastJoinAttemptMs) >= JOIN_RETRY_MS) {
-      gLastJoinAttemptMs = now;
-      ensureJoined();
+  switch(gSchedulerState) {
+    case SCHED_WAIT_FOR_JOIN:
+      gLoRaJoined = lwIsActivated();
+      if(!gLoRaJoined) {
+        if((now - gLastJoinAttemptMs) >= JOIN_RETRY_MS) {
+          gLastJoinAttemptMs = now;
+          gLoRaJoined = ensureJoined();
+        }
+        return;
+      }
+
+      gSchedulerState = SCHED_WAIT_FOR_REPORT;
+      break;
+
+    case SCHED_WAIT_FOR_REPORT:
+      gLoRaJoined = lwIsActivated();
+      if(!gLoRaJoined) {
+        gSchedulerState = SCHED_WAIT_FOR_JOIN;
+        return;
+      }
+
+      if((now - gLastReportMs) < intervalMs) {
+        return;
+      }
+
+      gSchedulerState = SCHED_READ_SENSOR;
+      break;
+
+    case SCHED_READ_SENSOR:
+      memset(&gPendingSensorData, 0, sizeof(gPendingSensorData));
+      if(!sensorRead(&gPendingSensorData)) {
+        Serial.println(F("[Sensor] Read failed."));
+        gSchedulerState = SCHED_WAIT_FOR_REPORT;
+        return;
+      }
+
+      gSchedulerState = SCHED_BUILD_PAYLOAD;
+      break;
+
+    case SCHED_BUILD_PAYLOAD:
+      memset(gPendingUplinkBuffer, 0, sizeof(gPendingUplinkBuffer));
+      gPendingUplinkLen = payloadEncodeUplink(
+        gPendingUplinkBuffer,
+        sizeof(gPendingUplinkBuffer),
+        &gPendingSensorData,
+        settings
+      );
+
+      if(gPendingUplinkLen == 0) {
+        Serial.println(F("[Payload] Encode failed."));
+        gSchedulerState = SCHED_WAIT_FOR_REPORT;
+        return;
+      }
+
+      printUplinkPayload(gPendingUplinkBuffer, gPendingUplinkLen, settings->payloadMode);
+      gSchedulerState = SCHED_SEND_UPLINK;
+      break;
+
+    case SCHED_SEND_UPLINK: {
+      gPendingDownlinkLen = sizeof(gPendingDownlinkBuffer);
+      memset(gPendingDownlinkBuffer, 0, gPendingDownlinkLen);
+
+      Serial.println(F("[LoRaWAN] Sending uplink ..."));
+
+      int16_t state = lwSendReceive(
+        gPendingUplinkBuffer,
+        gPendingUplinkLen,
+        gPendingDownlinkBuffer,
+        &gPendingDownlinkLen
+      );
+
+      if(state < 0) {
+        Serial.print(F("[LoRaWAN] Send failed, code "));
+        Serial.println(state);
+
+        if(state == RADIOLIB_ERR_NETWORK_NOT_JOINED) {
+          gLoRaJoined = false;
+          gLastJoinAttemptMs = 0;
+          gSchedulerState = SCHED_WAIT_FOR_JOIN;
+          Serial.println(F("[LoRaWAN] Session lost. Will retry join."));
+          return;
+        }
+
+        gSchedulerState = SCHED_WAIT_FOR_REPORT;
+        return;
+      }
+
+      Serial.println(F("[LoRaWAN] Uplink sent successfully."));
+      gLastReportMs = now;
+      gSchedulerState = SCHED_PROCESS_DOWNLINK;
+      break;
     }
 
-    delay(50);
-    return;
-  }
+    case SCHED_PROCESS_DOWNLINK:
+      if(gPendingDownlinkLen > 0) {
+        printDownlinkPayload(gPendingDownlinkBuffer, gPendingDownlinkLen);
 
-  // ------------------------------------------------------------
-  // REPORT SCHEDULING
-  // ------------------------------------------------------------
-  if((now - gLastReportMs) < intervalMs) {
-    delay(50);
-    return;
-  }
+        DownlinkCommand cmd = payloadDecodeDownlink(gPendingDownlinkBuffer, gPendingDownlinkLen);
+        if(cmd.valid) {
+          Serial.print(F("[Downlink] Command type: "));
+          Serial.println(cmd.type);
+          Serial.print(F("[Downlink] Command value: "));
+          Serial.println(cmd.value);
 
-  gLastReportMs = now;
+          applyDownlinkCommand(cmd);
+        } else {
+          Serial.println(F("[Downlink] No valid app command decoded."));
+        }
+      } else {
+        Serial.println(F("[Downlink] No app downlink received."));
+      }
 
-  // ------------------------------------------------------------
-  // SENSOR READ
-  // ------------------------------------------------------------
-  SensorData sensorData;
-  memset(&sensorData, 0, sizeof(sensorData));
+      gSchedulerState = SCHED_WAIT_FOR_REPORT;
+      break;
 
-  if(!sensorRead(&sensorData)) {
-    Serial.println(F("[Sensor] Read failed."));
-    return;
-  }
-
-  // ------------------------------------------------------------
-  // PAYLOAD BUILD
-  // ------------------------------------------------------------
-  uint8_t uplinkBuffer[255];
-  memset(uplinkBuffer, 0, sizeof(uplinkBuffer));
-
-  size_t uplinkLen = payloadEncodeUplink(
-    uplinkBuffer,
-    sizeof(uplinkBuffer),
-    &sensorData,
-    settings
-  );
-
-  if(uplinkLen == 0) {
-    Serial.println(F("[Payload] Encode failed."));
-    return;
-  }
-
-  printUplinkPayload(uplinkBuffer, uplinkLen, settings->payloadMode);
-
-  // ------------------------------------------------------------
-  // SEND / RECEIVE
-  // ------------------------------------------------------------
-  uint8_t downlinkBuffer[255];
-  memset(downlinkBuffer, 0, sizeof(downlinkBuffer));
-  size_t downlinkLen = sizeof(downlinkBuffer);
-
-  Serial.println(F("[LoRaWAN] Sending uplink ..."));
-
-  int16_t state = lwSendReceive(
-    uplinkBuffer,
-    uplinkLen,
-    downlinkBuffer,
-    &downlinkLen
-  );
-
-  if(state < 0) {
-    Serial.print(F("[LoRaWAN] Send failed, code "));
-    Serial.println(state);
-
-    if(state == RADIOLIB_ERR_NETWORK_NOT_JOINED) {
-      gLoRaJoined = false;
-      gLastJoinAttemptMs = 0;
-      Serial.println(F("[LoRaWAN] Session lost. Will retry join."));
-    }
-
-    return;
-  }
-
-  Serial.println(F("[LoRaWAN] Uplink sent successfully."));
-
-  // ------------------------------------------------------------
-  // DOWNLINK PROCESSING
-  // ------------------------------------------------------------
-  if(downlinkLen > 0) {
-    printDownlinkPayload(downlinkBuffer, downlinkLen);
-
-    DownlinkCommand cmd = payloadDecodeDownlink(downlinkBuffer, downlinkLen);
-    if(cmd.valid) {
-      Serial.print(F("[Downlink] Command type: "));
-      Serial.println(cmd.type);
-      Serial.print(F("[Downlink] Command value: "));
-      Serial.println(cmd.value);
-
-      applyDownlinkCommand(cmd);
-    } else {
-      Serial.println(F("[Downlink] No valid app command decoded."));
-    }
-  } else {
-    Serial.println(F("[Downlink] No app downlink received."));
+    default:
+      gSchedulerState = SCHED_WAIT_FOR_JOIN;
+      break;
   }
 }

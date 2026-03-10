@@ -26,29 +26,12 @@ static LoRaWANNode gNode(&gRadio, &gRegion, LORA_SUB_BAND);
 
 #if (LORA_USE_OTAA == 1)
 
-#define RADIOLIB_LORAWAN_JOIN_EUI  0x6081F9C63C1474C3
-
-#ifndef RADIOLIB_LORAWAN_DEV_EUI
-#define RADIOLIB_LORAWAN_DEV_EUI   0x6081F9A7215ECB6C
-#endif
-
-#ifndef RADIOLIB_LORAWAN_APP_KEY
-#define RADIOLIB_LORAWAN_APP_KEY \
-  0x1D, 0x4D, 0x81, 0x2C, 0xE7, 0x6D, 0xED, 0x85, \
-  0x06, 0x26, 0x39, 0x9C, 0xB1, 0x9E, 0xAF, 0x58
-#endif
-
-static uint64_t gJoinEUI = RADIOLIB_LORAWAN_JOIN_EUI;
-static uint64_t gDevEUI  = RADIOLIB_LORAWAN_DEV_EUI;
-static uint8_t gAppKey[] = { RADIOLIB_LORAWAN_APP_KEY };
+static uint64_t gJoinEUI = LORA_JOIN_EUI;
+static uint64_t gDevEUI  = LORA_DEV_EUI;
+static uint8_t gAppKey[] = { LORA_APP_KEY };
 
 #if (LORA_VERSION == 1)
-#ifndef RADIOLIB_LORAWAN_NWK_KEY
-#define RADIOLIB_LORAWAN_NWK_KEY \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-#endif
-static uint8_t gNwkKey[] = { RADIOLIB_LORAWAN_NWK_KEY };
+static uint8_t gNwkKey[] = { LORA_NWK_KEY };
 #endif
 
 #else

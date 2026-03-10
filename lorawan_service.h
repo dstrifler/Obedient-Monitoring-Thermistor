@@ -1,5 +1,5 @@
-#ifndef _LORAWAN_H
-#define _LORAWAN_H
+#ifndef _LORAWAN_SERVICE_H
+#define _LORAWAN_SERVICE_H
 
 #include <Arduino.h>
 #include <RadioLib.h>
@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "config.h"
-#include "eeprom_layout.h"
+#include "eeprom_service.h"
 
 #ifndef LORAWAN_UPLINK_FPORT
 #define LORAWAN_UPLINK_FPORT 1

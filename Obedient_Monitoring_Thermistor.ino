@@ -1,11 +1,11 @@
 #include <Arduino.h>
 
 #include "config.h"
-#include "eeprom_layout.h"
+#include "eeprom_service.h"
 #include "settings.h"
-#include "sensor.h"
-#include "payload.h"
-#include "lorawan.h"
+#include "sensor_service.h"
+#include "codec_service.h"
+#include "lorawan_service.h"
 
 // ============================================================
 // APP STATE

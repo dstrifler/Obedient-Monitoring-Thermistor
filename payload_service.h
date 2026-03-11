@@ -282,6 +282,11 @@ static size_t payloadEncodeCompactJson(
   if(idx == prevIdx) {
     truncated = true;
   }
+  if(truncated) {
+    // Intentional early exit on write issues to reduce wasted MCU cycles.
+    out[maxLen - 1] = '\0';
+    return 0;
+  }
 
   if(settings->tempEnabled) {
     float tempOut = payloadTempForOutput(data->temperatureC, settings->tempUnit);
@@ -296,6 +301,11 @@ static size_t payloadEncodeCompactJson(
     );
     idx = appendResult.idx;
     truncated = truncated || appendResult.truncated || appendResult.writeError;
+    if(truncated) {
+      // Intentional early exit on write issues to reduce wasted MCU cycles.
+      out[maxLen - 1] = '\0';
+      return 0;
+    }
     first = false;
   }
 
@@ -310,6 +320,11 @@ static size_t payloadEncodeCompactJson(
     );
     idx = appendResult.idx;
     truncated = truncated || appendResult.truncated || appendResult.writeError;
+    if(truncated) {
+      // Intentional early exit on write issues to reduce wasted MCU cycles.
+      out[maxLen - 1] = '\0';
+      return 0;
+    }
     first = false;
   }
 
@@ -329,6 +344,11 @@ static size_t payloadEncodeCompactJson(
     );
     idx = appendResult.idx;
     truncated = truncated || appendResult.truncated || appendResult.writeError;
+    if(truncated) {
+      // Intentional early exit on write issues to reduce wasted MCU cycles.
+      out[maxLen - 1] = '\0';
+      return 0;
+    }
     first = false;
   }
 
@@ -343,11 +363,24 @@ static size_t payloadEncodeCompactJson(
     );
     idx = appendResult.idx;
     truncated = truncated || appendResult.truncated || appendResult.writeError;
+    if(truncated) {
+      // Intentional early exit on write issues to reduce wasted MCU cycles.
+      out[maxLen - 1] = '\0';
+      return 0;
+    }
     first = false;
   }
 
   prevIdx = idx;
   idx = payloadAppend(out, maxLen, idx, "}");
+  if(idx == prevIdx) {
+    truncated = true;
+  }
+  if(truncated) {
+    // Intentional early exit on write issues to reduce wasted MCU cycles.
+    out[maxLen - 1] = '\0';
+    return 0;
+  }
   bool closingBraceWritten = (idx > prevIdx) && (out[idx - 1] == '}');
 
   if(truncated || !closingBraceWritten) {

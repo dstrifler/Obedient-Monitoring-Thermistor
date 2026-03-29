@@ -27,6 +27,15 @@ enum DownlinkCommandType : uint8_t {
   CMD_RESET_SETTINGS       = 0x09
 };
 
+// NOTE ABOUT PAYLOAD MODES (compile-time guidance):
+// - PAYLOAD_MODE_COMPACT_BIN is the most robust LoRaWAN mode across all data rates.
+// - PAYLOAD_MODE_COMPACT_JSON and PAYLOAD_MODE_VERBOSE_DEBUG are best-effort only.
+//   At low data rates, these textual payloads may exceed regional max FRMPayload and
+//   can be dropped or downgraded by preflight checks.
+static bool payloadModeIsBestEffort(uint8_t mode) {
+  return (mode == PAYLOAD_MODE_COMPACT_JSON) || (mode == PAYLOAD_MODE_VERBOSE_DEBUG);
+}
+
 struct DownlinkCommand {
   uint8_t type;
   uint8_t value;

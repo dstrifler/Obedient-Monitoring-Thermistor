@@ -91,6 +91,9 @@ static void printCurrentSettings() {
       Serial.println(F("Compact Binary"));
       break;
   }
+  if(payloadModeIsBestEffort(s->payloadMode)) {
+    Serial.println(F("Payload note: JSON/debug modes are best-effort and may be unavailable at low LoRaWAN data rates."));
+  }
 
   Serial.print(F("Report interval (min): "));
   Serial.println(s->reportIntervalMin);
@@ -200,6 +203,18 @@ static void printUplinkPayload(const uint8_t* buffer, size_t len, uint8_t payloa
     Serial.print(F("[Payload] TEXT: "));
     printBoundedTextPayload(buffer, len);
     Serial.println();
+  }
+}
+
+static const __FlashStringHelper* payloadModeLabel(uint8_t payloadMode) {
+  switch(payloadMode) {
+    case PAYLOAD_MODE_COMPACT_JSON:
+      return F("compact_json");
+    case PAYLOAD_MODE_VERBOSE_DEBUG:
+      return F("verbose_debug");
+    case PAYLOAD_MODE_COMPACT_BIN:
+    default:
+      return F("compact_bin");
   }
 }
 
@@ -375,6 +390,41 @@ void loop() {
       break;
 
     case SCHED_SEND_UPLINK: {
+      size_t maxPayloadBytes = lwMaxPayloadBytes();
+      if((maxPayloadBytes == 0) || (gPendingUplinkLen > maxPayloadBytes)) {
+        Serial.print(F("[Payload] Oversize for mode="));
+        Serial.print(payloadModeLabel(settings->payloadMode));
+        Serial.print(F(", len="));
+        Serial.print(gPendingUplinkLen);
+        Serial.print(F(", limit="));
+        Serial.println(maxPayloadBytes);
+
+        bool fallbackAttempted = (settings->payloadMode != PAYLOAD_MODE_COMPACT_BIN);
+        if(fallbackAttempted) {
+          Serial.println(F("[Payload] Attempting compact binary fallback for current uplink."));
+          memset(gPendingUplinkBuffer, 0, sizeof(gPendingUplinkBuffer));
+          gPendingUplinkLen = payloadEncodeCompactBin(
+            gPendingUplinkBuffer,
+            sizeof(gPendingUplinkBuffer),
+            &gPendingSensorData,
+            settings
+          );
+        }
+
+        if((maxPayloadBytes == 0) || (gPendingUplinkLen == 0) || (gPendingUplinkLen > maxPayloadBytes)) {
+          Serial.print(F("[Payload] Dropping uplink (len="));
+          Serial.print(gPendingUplinkLen);
+          Serial.print(F(", limit="));
+          Serial.print(maxPayloadBytes);
+          Serial.println(F("). Scheduler will continue after backoff."));
+          gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
+          gSchedulerState = SCHED_WAIT_FOR_REPORT;
+          return;
+        }
+
+        printUplinkPayload(gPendingUplinkBuffer, gPendingUplinkLen, PAYLOAD_MODE_COMPACT_BIN);
+      }
+
       gPendingDownlinkLen = sizeof(gPendingDownlinkBuffer);
       memset(gPendingDownlinkBuffer, 0, gPendingDownlinkLen);
 

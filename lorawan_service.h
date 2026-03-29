@@ -20,6 +20,11 @@ static SX1262 gRadio = new Module(
 
 static LoRaWANBand_t gRegion = LORA_BAND;
 static LoRaWANNode gNode(&gRadio, &gRegion, LORA_SUB_BAND);
+static uint8_t gCurrentDataRate = 0;
+
+#ifndef LORA_DEFAULT_DATA_RATE
+#define LORA_DEFAULT_DATA_RATE 0
+#endif
 
 // ============================================================
 // LORAWAN KEYS
@@ -76,6 +81,8 @@ static void lwInvalidatePersistedNonces(bool wipeNonces) {
 // ============================================================
 
 bool lwBegin() {
+  gCurrentDataRate = LORA_DEFAULT_DATA_RATE;
+
   if((LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)) {
     Serial.println(F("[LoRaWAN] Invalid uplink FPort. Must be 1..223."));
     return false;
@@ -242,6 +249,74 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   );
 
   return state;
+}
+
+// ============================================================
+// REGION / DATA-RATE PAYLOAD LIMIT HELPERS
+// ============================================================
+//
+// Returns the maximum FRMPayload bytes available to the application at a
+// given data-rate for this firmware's region build. Values are conservative
+// and include room for LoRaWAN MAC/FOpts overhead in typical Class A uplinks.
+// Unknown regions/data-rates fail closed to 0 so caller can safely drop/fallback.
+
+uint8_t lwGetCurrentDataRate() {
+  return gCurrentDataRate;
+}
+
+void lwSetCurrentDataRate(uint8_t dataRate) {
+  gCurrentDataRate = dataRate;
+}
+
+size_t lwMaxPayloadBytesFor(LoRaWANBand_t region, uint8_t dataRate) {
+  (void)region;
+#if (LORA_BAND == US915) || (LORA_BAND == AU915)
+  switch(dataRate) {
+    case 0:  return 11;
+    case 1:  return 53;
+    case 2:  return 125;
+    case 3:  return 242;
+    case 4:  return 242;
+    case 8:  return 53;
+    case 9:  return 129;
+    case 10: return 242;
+    case 11: return 242;
+    case 12: return 242;
+    case 13: return 242;
+    default: return 0;
+  }
+#elif (LORA_BAND == EU868) || (LORA_BAND == IN865) || (LORA_BAND == RU864)
+  switch(dataRate) {
+    case 0:
+    case 1:
+    case 2:  return 51;
+    case 3:  return 115;
+    case 4:
+    case 5:
+    case 6:
+    case 7:  return 222;
+    default: return 0;
+  }
+#elif (LORA_BAND == AS923) || (LORA_BAND == KR920)
+  switch(dataRate) {
+    case 0:
+    case 1:
+    case 2:  return 51;
+    case 3:  return 115;
+    case 4:
+    case 5:
+    case 6:
+    case 7:  return 222;
+    default: return 0;
+  }
+#else
+  return 0;
+#endif
+}
+
+size_t lwMaxPayloadBytes() {
+  uint8_t activeDataRate = (gCurrentDataRate <= 15) ? gCurrentDataRate : LORA_DEFAULT_DATA_RATE;
+  return lwMaxPayloadBytesFor(gRegion, activeDataRate);
 }
 
 #endif

@@ -26,6 +26,10 @@ enum PayloadMode : uint8_t {
   PAYLOAD_MODE_COMPACT_JSON = 1,
   PAYLOAD_MODE_VERBOSE_DEBUG = 2
 };
+// Settings contract note:
+// - COMPACT_BIN is the preferred transport mode for low-data-rate LoRaWAN links.
+// - COMPACT_JSON / VERBOSE_DEBUG are best-effort diagnostics and may be dropped
+//   by payload-size preflight checks when regional data-rate limits are tight.
 
 // ============================================================
 // SETTINGS STRUCT

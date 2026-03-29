@@ -316,9 +316,7 @@ void settingsLoad()
 
 void settingsBegin()
 {
-  EEPROM.init();
-  EEPROM.setLength(EEPROM_TOTAL_BYTES);
-
+  // EEPROM must already be initialized by app bootstrap (eepromBootstrap()).
   settingsLoad();
 }
 

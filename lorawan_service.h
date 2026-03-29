@@ -95,8 +95,7 @@ bool lwBegin() {
   }
   Serial.println(F("success!"));
 
-  EEPROM.init();
-  EEPROM.setLength(EEPROM_TOTAL_BYTES);
+  // EEPROM must already be initialized by app bootstrap (eepromBootstrap()).
 
   // Many SX126x boards (including LoRa Thing Plus variants) route
   // the RF front-end switch to DIO2. If this is not enabled, TX can

@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <RadioLib.h>
+#include <EEPROM.h>
 
 // Total EEPROM reservation
 #define EEPROM_TOTAL_BYTES 512
@@ -43,5 +44,17 @@
 
 #define SETTINGS_MAGIC                0x47534150UL   // "GSAP"
 #define SETTINGS_VERSION              2
+
+static inline void eepromBootstrap()
+{
+  static bool isInitialized = false;
+  if(isInitialized) {
+    return;
+  }
+
+  EEPROM.init();
+  EEPROM.setLength(EEPROM_TOTAL_BYTES);
+  isInitialized = true;
+}
 
 #endif

@@ -390,6 +390,13 @@ void loop() {
         Serial.print(F("[LoRaWAN] Send failed, code "));
         Serial.println(state);
 
+        if(state == LW_ERR_INVALID_ARGUMENT) {
+          Serial.println(F("[LoRaWAN] Send aborted: invalid API arguments (payload/downlink buffers)."));
+          gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
+          gSchedulerState = SCHED_WAIT_FOR_REPORT;
+          return;
+        }
+
         if(state == RADIOLIB_ERR_NETWORK_NOT_JOINED) {
           gLoRaJoined = false;
           gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;

@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <RadioLib.h>
 #include <EEPROM.h>
+#include <limits.h>
 #include <string.h>
 
 #include "config.h"
@@ -48,6 +49,18 @@ static uint8_t gSNwkSIntKey[] = { LORA_SNWKS_INT_KEY };
 #endif
 
 static uint8_t gLWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+
+// Wrapper policy for local preflight parameter validation:
+// - Prefer a generic RadioLib invalid-argument error code when available.
+// - If not provided by the bundled RadioLib version, use a dedicated local
+//   code so caller logs can clearly separate API misuse from RF/join failures.
+#if defined(RADIOLIB_ERR_INVALID_ARGUMENT)
+static const int16_t LW_ERR_INVALID_ARGUMENT = RADIOLIB_ERR_INVALID_ARGUMENT;
+#elif defined(RADIOLIB_ERR_INVALID_PARAM)
+static const int16_t LW_ERR_INVALID_ARGUMENT = RADIOLIB_ERR_INVALID_PARAM;
+#else
+static const int16_t LW_ERR_INVALID_ARGUMENT = (int16_t)(INT16_MIN + 42);
+#endif
 
 static void lwInvalidatePersistedNonces(bool wipeNonces) {
   if(wipeNonces) {
@@ -206,7 +219,11 @@ bool lwActivate() {
 
 int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, size_t* lenDown) {
   if(dataDown == nullptr || lenDown == nullptr) {
-    return RADIOLIB_ERR_INVALID_DATA_SHAPING;
+    return LW_ERR_INVALID_ARGUMENT;
+  }
+
+  if((dataUp == nullptr) && (lenUp > 0)) {
+    return LW_ERR_INVALID_ARGUMENT;
   }
 
   LoRaWANEvent_t eventUp;

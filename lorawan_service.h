@@ -55,6 +55,8 @@ static uint8_t gSNwkSIntKey[] = { LORA_SNWKS_INT_KEY };
 
 static uint8_t gLWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
 
+size_t lwMaxPayloadBytes();
+
 // Wrapper policy for local preflight parameter validation:
 // - Prefer a generic RadioLib invalid-argument error code when available.
 // - If not provided by the bundled RadioLib version, use a dedicated local
@@ -74,6 +76,52 @@ static void lwInvalidatePersistedNonces(bool wipeNonces) {
   }
 
   EEPROM.write(EEPROM_LORAWAN_FLAG_ADDR, 0x00);
+}
+
+template <typename T>
+static auto lwReadNodeDataRateImpl(T& node, int) -> decltype(node.getDataRate(), int16_t()) {
+  return node.getDataRate();
+}
+
+template <typename T>
+static auto lwReadNodeDataRateImpl(T& node, long) -> decltype(node.getDatarate(), int16_t()) {
+  return node.getDatarate();
+}
+
+template <typename T>
+static int16_t lwReadNodeDataRateImpl(T&, ...) {
+  return RADIOLIB_ERR_UNSUPPORTED;
+}
+
+static int16_t lwReadNodeDataRate() {
+  return lwReadNodeDataRateImpl(gNode, 0);
+}
+
+static void lwRefreshCurrentDataRate(const LoRaWANEvent_t* eventMeta, const __FlashStringHelper* reason) {
+  bool refreshed = false;
+  uint8_t newDataRate = gCurrentDataRate;
+
+  int16_t nodeDataRate = lwReadNodeDataRate();
+  if((nodeDataRate >= 0) && (nodeDataRate <= 15)) {
+    newDataRate = (uint8_t)nodeDataRate;
+    refreshed = true;
+  } else if((eventMeta != nullptr) && (eventMeta->datarate <= 15)) {
+    newDataRate = eventMeta->datarate;
+    refreshed = true;
+  }
+
+  if(!refreshed) {
+    return;
+  }
+
+  gCurrentDataRate = newDataRate;
+
+  Serial.print(F("[LoRaWAN] DR sync "));
+  Serial.print(reason);
+  Serial.print(F(": DR"));
+  Serial.print(gCurrentDataRate);
+  Serial.print(F(", maxPayload="));
+  Serial.println(lwMaxPayloadBytes());
 }
 
 // ============================================================
@@ -204,12 +252,14 @@ bool lwActivate() {
 #endif
 
   if(state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
+    lwRefreshCurrentDataRate(nullptr, F("(session-restored)"));
     Serial.println(F("[LoRaWAN] Session restored!"));
     return true;
   }
 
   if(state == RADIOLIB_LORAWAN_NEW_SESSION) {
     lwSaveNonces();
+    lwRefreshCurrentDataRate(nullptr, F("(new-session)"));
     Serial.println(F("[LoRaWAN] Successfully started new session!"));
     return true;
   }
@@ -237,6 +287,14 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
 
   uint8_t* up = (uint8_t*)dataUp;
 
+  lwRefreshCurrentDataRate(nullptr, F("(pre-send)"));
+  Serial.print(F("[LoRaWAN] Uplink preflight: DR"));
+  Serial.print(gCurrentDataRate);
+  Serial.print(F(", maxPayload="));
+  Serial.print(lwMaxPayloadBytes());
+  Serial.print(F(", len="));
+  Serial.println(lenUp);
+
   int16_t state = gNode.sendReceive(
     up,
     lenUp,
@@ -247,6 +305,10 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
     &eventUp,
     &eventDown
   );
+
+  if(state >= RADIOLIB_ERR_NONE) {
+    lwRefreshCurrentDataRate(&eventUp, F("(post-uplink)"));
+  }
 
   return state;
 }

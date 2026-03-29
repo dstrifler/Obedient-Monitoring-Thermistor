@@ -250,6 +250,7 @@ void setup() {
   Serial.println();
   Serial.println(F("Garage Sensor Starting..."));
 
+  eepromBootstrap();
   settingsBegin();
   syncPeriodicityFromSettings();
   printCurrentSettings();

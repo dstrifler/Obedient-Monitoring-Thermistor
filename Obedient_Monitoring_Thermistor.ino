@@ -3,9 +3,6 @@
 #include "config.h"
 #include "clock_service.h"
 #include "eeprom_service.h"
-#include "settings_service.h"
-#include "sensor_service.h"
-#include "payload_service.h"
 #include "lorawan_service.h"
 
 // ============================================================
@@ -15,8 +12,10 @@
 static uint32_t gLastReportMs = 0;
 static uint32_t gLastJoinAttemptMs = 0;
 static bool gLoRaJoined = false;
-static uint32_t gPeriodicitySeconds = DEFAULT_UPLINK_INTERVAL_SECONDS;
-static uint32_t gPeriodicityMs = DEFAULT_UPLINK_INTERVAL_SECONDS * 1000UL;
+// Fixed test cadence, independent of saved settings and sensor defaults.
+static constexpr uint32_t REPORT_INTERVAL_MS = 60UL * 1000UL;
+// Send only these 11 ASCII bytes, without the trailing NUL.
+static const uint8_t HELLO_WORLD_PAYLOAD[] = "Hello World";
 
 static const uint32_t JOIN_RETRY_MS = 60000UL;
 static const uint32_t REPORT_RETRY_BACKOFF_MS = 5000UL;
@@ -25,199 +24,18 @@ static const uint32_t LOOP_SLICE_MS = 50UL;
 enum SchedulerState : uint8_t {
   SCHED_WAIT_FOR_JOIN = 0,
   SCHED_WAIT_FOR_REPORT,
-  SCHED_TRIGGER_SENSOR,
-  SCHED_FETCH_SENSOR,
-  SCHED_BUILD_PAYLOAD,
   SCHED_SEND_UPLINK,
   SCHED_PROCESS_DOWNLINK
 };
 
 static SchedulerState gSchedulerState = SCHED_WAIT_FOR_JOIN;
-static SensorData gPendingSensorData;
-static uint8_t gPendingUplinkBuffer[255];
-static size_t gPendingUplinkLen = 0;
 static uint8_t gPendingDownlinkBuffer[255];
 static size_t gPendingDownlinkLen = 0;
 static uint32_t gNextSchedulerTickMs = 0;
-static uint32_t gSensorTriggerMs = 0;
 
 // ============================================================
 // HELPERS
 // ============================================================
-
-static void printCurrentSettings() {
-  AppSettings* s = settingsGet();
-
-  Serial.println(F("---- Current Settings ----"));
-
-  Serial.print(F("Temp enabled: "));
-  Serial.println(s->tempEnabled ? F("ON") : F("OFF"));
-
-  Serial.print(F("Humidity enabled: "));
-  Serial.println(s->humidityEnabled ? F("ON") : F("OFF"));
-
-  Serial.print(F("Pressure enabled: "));
-  Serial.println(s->pressureEnabled ? F("ON") : F("OFF"));
-
-  Serial.print(F("Gas enabled: "));
-  Serial.println(s->gasEnabled ? F("ON") : F("OFF"));
-
-  Serial.print(F("Temp unit: "));
-  Serial.println((s->tempUnit == TEMP_UNIT_F) ? F("F") : F("C"));
-
-  Serial.print(F("Pressure unit: "));
-  switch(s->pressureUnit) {
-    case PRESSURE_UNIT_HPA:
-      Serial.println(F("hPa"));
-      break;
-    case PRESSURE_UNIT_INHG:
-      Serial.println(F("inHg"));
-      break;
-    case PRESSURE_UNIT_PA:
-    default:
-      Serial.println(F("Pa"));
-      break;
-  }
-
-  Serial.print(F("Payload mode: "));
-  switch(s->payloadMode) {
-    case PAYLOAD_MODE_COMPACT_JSON:
-      Serial.println(F("Compact JSON"));
-      break;
-    case PAYLOAD_MODE_VERBOSE_DEBUG:
-      Serial.println(F("Verbose / Debug"));
-      break;
-    case PAYLOAD_MODE_COMPACT_BIN:
-    default:
-      Serial.println(F("Compact Binary"));
-      break;
-  }
-  if(payloadModeIsBestEffort(s->payloadMode)) {
-    Serial.println(F("Payload note: JSON/debug modes are best-effort and may be unavailable at low LoRaWAN data rates."));
-  }
-
-  Serial.print(F("Report interval (min): "));
-  Serial.println(s->reportIntervalMin);
-
-  Serial.println(F("--------------------------"));
-}
-
-static void syncPeriodicityFromSettings() {
-  AppSettings* s = settingsGet();
-  gPeriodicitySeconds = (uint32_t)s->reportIntervalMin * 60UL;
-  gPeriodicityMs = gPeriodicitySeconds * 1000UL;
-}
-
-static bool applyDownlinkCommand(const DownlinkCommand& cmd) {
-  bool changed = false;
-
-  switch(cmd.type) {
-    case CMD_SET_TEMP_ENABLED:
-      changed = settingsSetTempEnabled(cmd.value != 0);
-      break;
-
-    case CMD_SET_HUMIDITY_ENABLED:
-      changed = settingsSetHumidityEnabled(cmd.value != 0);
-      break;
-
-    case CMD_SET_PRESSURE_ENABLED:
-      changed = settingsSetPressureEnabled(cmd.value != 0);
-      break;
-
-    case CMD_SET_GAS_ENABLED:
-      changed = settingsSetGasEnabled(cmd.value != 0);
-      break;
-
-    case CMD_SET_TEMP_UNIT:
-      changed = settingsSetTempUnit(cmd.value);
-      break;
-
-    case CMD_SET_PRESSURE_UNIT:
-      changed = settingsSetPressureUnit(cmd.value);
-      break;
-
-    case CMD_SET_REPORT_INTERVAL:
-      changed = settingsSetReportInterval(cmd.value);
-      if(changed) {
-        syncPeriodicityFromSettings();
-      }
-      break;
-
-    case CMD_SET_PAYLOAD_MODE:
-      changed = settingsSetPayloadMode(cmd.value);
-      break;
-
-    case CMD_RESET_SETTINGS:
-      if(cmd.value == 0xA5) {
-        settingsResetDefaults();
-        syncPeriodicityFromSettings();
-        changed = true;
-      }
-      break;
-
-    case CMD_NONE:
-    default:
-      changed = false;
-      break;
-  }
-
-  if(changed) {
-    settingsSave();
-    Serial.println(F("[Settings] Updated from downlink."));
-    printCurrentSettings();
-  } else {
-    Serial.println(F("[Settings] Downlink command rejected or no change."));
-  }
-
-  return changed;
-}
-
-static void printBoundedTextPayload(const uint8_t* buffer, size_t len) {
-  if(buffer == nullptr || len == 0) {
-    return;
-  }
-
-  for(size_t i = 0; i < len; i++) {
-    Serial.write(buffer[i]);
-  }
-}
-
-static void printUplinkPayload(const uint8_t* buffer, size_t len, uint8_t payloadMode) {
-  if(buffer == nullptr || len == 0) {
-    Serial.println(F("[Payload] Empty payload"));
-    return;
-  }
-
-  Serial.print(F("[Payload] Length: "));
-  Serial.println(len);
-
-  if(payloadMode == PAYLOAD_MODE_COMPACT_BIN) {
-    Serial.print(F("[Payload] HEX: "));
-    for(size_t i = 0; i < len; i++) {
-      if(buffer[i] < 0x10) {
-        Serial.print('0');
-      }
-      Serial.print(buffer[i], HEX);
-    }
-    Serial.println();
-  } else {
-    Serial.print(F("[Payload] TEXT: "));
-    printBoundedTextPayload(buffer, len);
-    Serial.println();
-  }
-}
-
-static const __FlashStringHelper* payloadModeLabel(uint8_t payloadMode) {
-  switch(payloadMode) {
-    case PAYLOAD_MODE_COMPACT_JSON:
-      return F("compact_json");
-    case PAYLOAD_MODE_VERBOSE_DEBUG:
-      return F("verbose_debug");
-    case PAYLOAD_MODE_COMPACT_BIN:
-    default:
-      return F("compact_bin");
-  }
-}
 
 static void printDownlinkPayload(const uint8_t* buffer, size_t len) {
   Serial.print(F("[Downlink] Length: "));
@@ -245,8 +63,7 @@ static bool ensureJoined() {
   gLoRaJoined = gLoRaJoined && lwIsActivated();
 
   if(gLoRaJoined) {
-    syncPeriodicityFromSettings();
-    gLastReportMs = millis() - gPeriodicityMs;
+    gLastReportMs = millis() - REPORT_INTERVAL_MS;
     Serial.println(F("[LoRaWAN] Join successful."));
     return true;
   }
@@ -264,7 +81,7 @@ void setup() {
   delay(2000);
 
   Serial.println();
-  Serial.println(F("Garage Sensor Starting..."));
+  Serial.println(F("Garage Hello World Test Starting..."));
 
   // Calibrate the Apollo3 HFRC before initializing the SX1262 or RadioLib.
   // Abort startup if timing cannot be verified: unreliable timing can miss
@@ -277,15 +94,7 @@ void setup() {
   }
 
   eepromBootstrap();
-  settingsBegin();
-  syncPeriodicityFromSettings();
-  printCurrentSettings();
-
-  if(!sensorBegin()) {
-    Serial.println(F("[Sensor] BME68x init failed."));
-  } else {
-    Serial.println(F("[Sensor] BME68x initialized."));
-  }
+  Serial.println(F("[Test] Sensor disabled. Sending Hello World every 60 seconds after join."));
 
   if(!lwBegin()) {
     Serial.println(F("[LoRaWAN] Begin failed."));
@@ -300,7 +109,7 @@ void setup() {
 
   gLoRaJoined = false;
   gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;
-  gLastReportMs = millis() - gPeriodicityMs;
+  gLastReportMs = millis() - REPORT_INTERVAL_MS;
   gNextSchedulerTickMs = 0;
   gSchedulerState = SCHED_WAIT_FOR_JOIN;
 
@@ -310,10 +119,8 @@ void setup() {
 // ============================================================
 // LOOP
 // ============================================================
-// Preferred sensor acquisition path is non-blocking in scheduler runtime:
-// 1) SCHED_TRIGGER_SENSOR calls sensorTrigger() to start forced conversion.
-// 2) SCHED_FETCH_SENSOR waits SENSOR_FORCED_DELAY_MS then calls sensorFetch().
-// Avoid using blocking compatibility paths in scheduler-driven execution.
+// The test bypasses sensor acquisition and saved application settings.
+// RadioLib still owns activation and Class A receive-window timing.
 
 void loop() {
   uint32_t now = millis();
@@ -321,8 +128,6 @@ void loop() {
     return;
   }
   gNextSchedulerTickMs = now + LOOP_SLICE_MS;
-
-  AppSettings* settings = settingsGet();
 
   switch(gSchedulerState) {
     case SCHED_WAIT_FOR_JOIN:
@@ -345,105 +150,32 @@ void loop() {
         return;
       }
 
-      if((now - gLastReportMs) < gPeriodicityMs) {
+      if((now - gLastReportMs) < REPORT_INTERVAL_MS) {
         return;
       }
 
-      gSchedulerState = SCHED_TRIGGER_SENSOR;
-      break;
-
-    case SCHED_TRIGGER_SENSOR:
-      if(!sensorTrigger()) {
-        Serial.println(F("[Sensor] Trigger failed."));
-        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
-        gSchedulerState = SCHED_WAIT_FOR_REPORT;
-        return;
-      }
-
-      gSensorTriggerMs = now;
-      gSchedulerState = SCHED_FETCH_SENSOR;
-      break;
-
-    case SCHED_FETCH_SENSOR:
-      if((now - gSensorTriggerMs) < SENSOR_FORCED_DELAY_MS) {
-        return;
-      }
-
-      memset(&gPendingSensorData, 0, sizeof(gPendingSensorData));
-      if(!sensorFetch(&gPendingSensorData)) {
-        Serial.println(F("[Sensor] Read failed."));
-        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
-        gSchedulerState = SCHED_WAIT_FOR_REPORT;
-        return;
-      }
-
-      gSchedulerState = SCHED_BUILD_PAYLOAD;
-      break;
-
-    case SCHED_BUILD_PAYLOAD:
-      memset(gPendingUplinkBuffer, 0, sizeof(gPendingUplinkBuffer));
-      gPendingUplinkLen = payloadEncodeUplink(
-        gPendingUplinkBuffer,
-        sizeof(gPendingUplinkBuffer),
-        &gPendingSensorData,
-        settings
-      );
-
-      if(gPendingUplinkLen == 0) {
-        Serial.println(F("[Payload] Encode failed."));
-        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
-        gSchedulerState = SCHED_WAIT_FOR_REPORT;
-        return;
-      }
-
-      printUplinkPayload(gPendingUplinkBuffer, gPendingUplinkLen, settings->payloadMode);
       gSchedulerState = SCHED_SEND_UPLINK;
       break;
 
     case SCHED_SEND_UPLINK: {
+      const size_t payloadLen = sizeof(HELLO_WORLD_PAYLOAD) - 1;
       size_t maxPayloadBytes = lwMaxPayloadBytes();
-      if((maxPayloadBytes == 0) || (gPendingUplinkLen > maxPayloadBytes)) {
-        Serial.print(F("[Payload] Oversize for mode="));
-        Serial.print(payloadModeLabel(settings->payloadMode));
-        Serial.print(F(", len="));
-        Serial.print(gPendingUplinkLen);
-        Serial.print(F(", limit="));
-        Serial.println(maxPayloadBytes);
-
-        bool fallbackAttempted = (settings->payloadMode != PAYLOAD_MODE_COMPACT_BIN);
-        if(fallbackAttempted) {
-          Serial.println(F("[Payload] Attempting compact binary fallback for current uplink."));
-          memset(gPendingUplinkBuffer, 0, sizeof(gPendingUplinkBuffer));
-          gPendingUplinkLen = payloadEncodeCompactBin(
-            gPendingUplinkBuffer,
-            sizeof(gPendingUplinkBuffer),
-            &gPendingSensorData,
-            settings
-          );
-        }
-
-        if((maxPayloadBytes == 0) || (gPendingUplinkLen == 0) || (gPendingUplinkLen > maxPayloadBytes)) {
-          Serial.print(F("[Payload] Dropping uplink (len="));
-          Serial.print(gPendingUplinkLen);
-          Serial.print(F(", limit="));
-          Serial.print(maxPayloadBytes);
-          Serial.println(F("). Scheduler will continue after backoff."));
-          gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
-          gSchedulerState = SCHED_WAIT_FOR_REPORT;
-          return;
-        }
-
-        printUplinkPayload(gPendingUplinkBuffer, gPendingUplinkLen, PAYLOAD_MODE_COMPACT_BIN);
+      if((maxPayloadBytes == 0) || (payloadLen > maxPayloadBytes)) {
+        Serial.println(F("[Payload] Hello World exceeds current payload limit. Retrying after backoff."));
+        gLastReportMs = now - REPORT_INTERVAL_MS + REPORT_RETRY_BACKOFF_MS;
+        gSchedulerState = SCHED_WAIT_FOR_REPORT;
+        return;
       }
 
+      Serial.println(F("[Payload] TEXT: Hello World (11 bytes)"));
       gPendingDownlinkLen = sizeof(gPendingDownlinkBuffer);
       memset(gPendingDownlinkBuffer, 0, gPendingDownlinkLen);
 
       Serial.println(F("[LoRaWAN] Sending uplink ..."));
 
       int16_t state = lwSendReceive(
-        gPendingUplinkBuffer,
-        gPendingUplinkLen,
+        HELLO_WORLD_PAYLOAD,
+        payloadLen,
         gPendingDownlinkBuffer,
         &gPendingDownlinkLen
       );
@@ -454,7 +186,7 @@ void loop() {
 
         if(state == LW_ERR_INVALID_ARGUMENT) {
           Serial.println(F("[LoRaWAN] Send aborted: invalid API arguments (payload/downlink buffers)."));
-          gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
+          gLastReportMs = now - REPORT_INTERVAL_MS + REPORT_RETRY_BACKOFF_MS;
           gSchedulerState = SCHED_WAIT_FOR_REPORT;
           return;
         }
@@ -467,7 +199,7 @@ void loop() {
           return;
         }
 
-        gLastReportMs = now - gPeriodicityMs + REPORT_RETRY_BACKOFF_MS;
+        gLastReportMs = now - REPORT_INTERVAL_MS + REPORT_RETRY_BACKOFF_MS;
         gSchedulerState = SCHED_WAIT_FOR_REPORT;
         return;
       }
@@ -482,17 +214,7 @@ void loop() {
       if(gPendingDownlinkLen > 0) {
         printDownlinkPayload(gPendingDownlinkBuffer, gPendingDownlinkLen);
 
-        DownlinkCommand cmd = payloadDecodeDownlink(gPendingDownlinkBuffer, gPendingDownlinkLen);
-        if(cmd.valid) {
-          Serial.print(F("[Downlink] Command type: "));
-          Serial.println(cmd.type);
-          Serial.print(F("[Downlink] Command value: "));
-          Serial.println(cmd.value);
-
-          applyDownlinkCommand(cmd);
-        } else {
-          Serial.println(F("[Downlink] No valid app command decoded."));
-        }
+        Serial.println(F("[Test] Application commands ignored; payload and interval are fixed."));
       } else {
         Serial.println(F("[Downlink] No app downlink received."));
       }

@@ -122,18 +122,31 @@ int main() {
 
 # Compile the actual sketch after replacing only its hardware includes.
 sketch = re.sub(r'^#include .*\n', '', (ROOT / 'Obedient_Monitoring_Thermistor.ino').read_text(), flags=re.M)
-FAKES = r'''
+import os
+upstream = Path(os.environ.get('RADIOLIB_UPSTREAM',
+    str(ROOT.parent / '.thermistor-tools/user/libraries/RadioLib')))
+error_names = {
+ 'RADIOLIB_ERR_NONE','RADIOLIB_ERR_UNKNOWN','RADIOLIB_ERR_NULL_POINTER',
+ 'RADIOLIB_ERR_INVALID_PORT','RADIOLIB_ERR_INVALID_REVISION','RADIOLIB_ERR_INVALID_MODE',
+ 'RADIOLIB_ERR_INVALID_DATA_RATE','RADIOLIB_ERR_INVALID_FREQUENCY','RADIOLIB_ERR_NETWORK_NOT_JOINED',
+ 'RADIOLIB_ERR_UPLINK_UNAVAILABLE','RADIOLIB_ERR_PACKET_TOO_LONG','RADIOLIB_ERR_DWELL_TIME_EXCEEDED',
+ 'RADIOLIB_ERR_TX_TIMEOUT','RADIOLIB_ERR_RX_TIMEOUT','RADIOLIB_ERR_SPI_WRITE_FAILED',
+ 'RADIOLIB_ERR_SPI_CMD_TIMEOUT','RADIOLIB_ERR_SPI_CMD_INVALID','RADIOLIB_ERR_SPI_CMD_FAILED',
+ 'RADIOLIB_ERR_CHIP_NOT_FOUND','RADIOLIB_ERR_NO_JOIN_ACCEPT','RADIOLIB_ERR_NONCES_DISCARDED',
+ 'RADIOLIB_ERR_CHECKSUM_MISMATCH',
+}
+error_defines = '\n'.join(line for line in (upstream / 'src/TypeDef.h').read_text().splitlines()
+                          if line.startswith('#define ') and line.split()[1] in error_names) + '\n'
+assert len(error_defines.splitlines()) == len(error_names)
+FAKES = error_defines + r'''
 constexpr int16_t LW_ERR_INVALID_ARGUMENT=-100, LW_ERR_PERSISTENCE=-32000, LW_ERR_NONCE_EXHAUSTED=-31999;
-constexpr int16_t RADIOLIB_ERR_NULL_POINTER=-1, RADIOLIB_ERR_INVALID_PORT=-2,
- RADIOLIB_ERR_INVALID_REVISION=-3, RADIOLIB_ERR_INVALID_MODE=-4,
- RADIOLIB_ERR_INVALID_DATA_RATE=-5, RADIOLIB_ERR_INVALID_FREQUENCY=-6,
- RADIOLIB_ERR_NETWORK_NOT_JOINED=-7, RADIOLIB_ERR_UPLINK_UNAVAILABLE=-8,
- RADIOLIB_ERR_PACKET_TOO_LONG=-9, RADIOLIB_ERR_DWELL_TIME_EXCEEDED=-10;
 bool activated=false, joinWorks=true, persistence=true;
 int joins=0, recoveries=0, sendResult=0, activationResult=-42;
 bool recoveryWorks=true;
 size_t limit=11;
-uint32_t eligibleAt=0;
+uint32_t eligibleAt=0,forcedWait=0,waitAfterSend=0;
+unsigned eligibilityQueries=0,capacityChanges=0;
+bool capacityWorks=true,capacityImproves=true;
 std::vector<uint32_t> sends;
 std::vector<size_t> lengths;
 bool clockBegin() { return true; }
@@ -146,11 +159,19 @@ int16_t lwLastActivationState() { return activationResult; }
 bool lwIsActivated() { return activated; }
 bool lwActivate() { ++joins; activated=joinWorks; return activated; }
 size_t lwMaxPayloadBytes() { return limit; }
-uint32_t lwTimeUntilUplink() { return int32_t(eligibleAt-ticks)>0?eligibleAt-ticks:0; }
+uint32_t lwTimeUntilUplink() { ++eligibilityQueries;return forcedWait?forcedWait:(int32_t(eligibleAt-ticks)>0?eligibleAt-ticks:0); }
+bool lwTryCapacityDataRate(size_t,uint16_t& tried) {
+ if(tried & 1) { return false; }
+ tried|=1;++capacityChanges;
+ if(!capacityWorks) { return false; }
+ if(capacityImproves) { sendResult=0;limit=11; }
+ return true;
+}
 int16_t lwSendReceive(const uint8_t* data,size_t size,uint8_t*,size_t* received) {
  assert(activated); assert(*received==0); assert(size==0 || (size==11 && memcmp(data,"Hello World",11)==0));
  sends.push_back(ticks); lengths.push_back(size);
  *received=0;
+ if(waitAfterSend) { forcedWait=waitAfterSend; }
  if(sendResult==RADIOLIB_ERR_NETWORK_NOT_JOINED) activated=false;
  return sendResult;
 }
@@ -159,8 +180,8 @@ run('scheduler', COMMON + FAKES + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks; while(uint32_t(ticks-start)<ms) loop(); }
 void reset() {
  ticks=0; activated=false; joinWorks=true; persistence=true; sendResult=0; limit=11;
- eligibleAt=0; joins=0; sends.clear(); lengths.clear();
- gRetryBackoffMs=5000; gUnavailableAttempts=0; gRecoveryAttempts=0; recoveries=0; recoveryWorks=true; gReportWaitMs=60000; setup();
+ eligibleAt=0;forcedWait=0;waitAfterSend=0;eligibilityQueries=0;capacityChanges=0;capacityWorks=true;capacityImproves=true;joins=0;activationResult=-42;sends.clear();lengths.clear();
+ gJoinHardwareFailures=0;gCapacityFailures=0;gCapacityRatesTried=0;gRetryBackoffMs=5000; gUnavailableAttempts=0; gRecoveryAttempts=0; recoveries=0; recoveryWorks=true; gReportWaitMs=60000; setup();
 }
 int main() {
  // Waiting for a tick sleeps through the idle interval, including rollover.
@@ -529,11 +550,6 @@ using RadioLibTime_t=uint32_t;
 #define LORA_USE_OTAA 1
 #define LORA_UPLINK_FPORT 1
 #define LORA_SUB_BAND 2
-#define RADIOLIB_ERR_UNKNOWN -99
-#define RADIOLIB_ERR_NONE 0
-#define RADIOLIB_ERR_NO_JOIN_ACCEPT -1116
-#define RADIOLIB_ERR_NONCES_DISCARDED -1115
-#define RADIOLIB_ERR_CHECKSUM_MISMATCH -1114
 #define RADIOLIB_LORAWAN_SESSION_RESTORED -1117
 #define RADIOLIB_LORAWAN_NEW_SESSION -1118
 #define RADIOLIB_LORAWAN_JOIN_REQUEST_LEN 23
@@ -650,6 +666,7 @@ bool lwPersistenceHealthy() { return gPersistenceHealthy; }
 int16_t lwLastActivationState() { return gLastActivationState; }
 size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
 uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
+bool lwTryCapacityDataRate(size_t,uint16_t&) { return false; }
 '''
 stock_integration = (COMMON + error_constants + schema + STOCK_FAKE + templates +
                      stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
@@ -704,5 +721,184 @@ int main() {
  assert(gRadio.attempted.size()==2 && gRadio.attempted[1]==16);
  assert(gRetryBackoffMs==5000 && gUnavailableAttempts==0);
  advance(61000);assert(gRadio.uplinkCalls==3);
+}
+''')
+
+run('airtime_wait_validation_and_rechecks', COMMON + FAKES + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ setup();eligibleAt=ticks+180000;
+ advance(125000);
+ assert(sends.empty() && eligibilityQueries>=3 && recoveries==0 && gReportWaitMs<=60000);
+ advance(60000);assert(sends.size()==1); // No RF before the real eligibility deadline.
+ // Rechecks also notice when a long deferral is removed early.
+ eligibleAt=ticks+3600000;gSchedulerState=SCHED_SEND_UPLINK;loop();
+ assert(gReportWaitMs==60000);eligibleAt=ticks;advance(61000);assert(sends.size()==2);
+ forcedWait=0xFFFFFFFFUL;gSchedulerState=SCHED_SEND_UPLINK;loop();
+ assert(gSchedulerState==SCHED_RECOVER_RADIO && sends.size()==2);
+ forcedWait=0;advance(59000);assert(recoveries==0);
+ advance(2000);assert(recoveries==1);
+ // Validate the result obtained after an UPLINK_UNAVAILABLE error too.
+ sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;waitAfterSend=0x80000000UL;
+ forcedWait=0;activated=true;gSchedulerState=SCHED_SEND_UPLINK;loop();
+ assert(gSchedulerState==SCHED_RECOVER_RADIO);
+ // Re-query scheduling uses elapsed durations across wrap.
+ forcedWait=0;waitAfterSend=0;sendResult=0;ticks=UINT32_MAX-100000;
+ gNextSchedulerTickMs=ticks;eligibleAt=ticks+180000;gSchedulerState=SCHED_SEND_UPLINK;
+ size_t before=sends.size();advance(179000);assert(sends.size()==before);
+ advance(2000);assert(sends.size()==before+1);
+}
+''')
+
+run('join_hardware_failure_policy', COMMON + FAKES + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ setup();joinWorks=false;activationResult=RADIOLIB_ERR_SPI_CMD_TIMEOUT;
+ advance(121000);assert(joins==3 && gSchedulerState==SCHED_RECOVER_RADIO && recoveries==0);
+ advance(58000);assert(recoveries==0);
+ joinWorks=true;advance(4000);assert(recoveries==1 && activated && gJoinHardwareFailures==0);
+ // A no-JoinAccept result interrupts a streak of radio hardware errors.
+ activated=false;joinWorks=false;gSchedulerState=SCHED_WAIT_FOR_JOIN;
+ activationResult=RADIOLIB_ERR_TX_TIMEOUT;assert(!ensureJoined() && gJoinHardwareFailures==1);
+ activationResult=RADIOLIB_ERR_NO_JOIN_ACCEPT;assert(!ensureJoined() && gJoinHardwareFailures==0);
+ for(unsigned i=0;i<10;++i) { assert(!ensureJoined() && gSchedulerState==SCHED_WAIT_FOR_JOIN); }
+ for(int16_t state : {RADIOLIB_ERR_TX_TIMEOUT,RADIOLIB_ERR_RX_TIMEOUT,
+  RADIOLIB_ERR_SPI_WRITE_FAILED,RADIOLIB_ERR_SPI_CMD_TIMEOUT,RADIOLIB_ERR_SPI_CMD_INVALID,
+  RADIOLIB_ERR_SPI_CMD_FAILED,RADIOLIB_ERR_CHIP_NOT_FOUND}) { assert(hardwareLoRaError(state)); }
+ assert(!hardwareLoRaError(RADIOLIB_ERR_NO_JOIN_ACCEPT));
+}
+''')
+
+run('capacity_retry_policy', COMMON + FAKES + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ setup();sendResult=RADIOLIB_ERR_PACKET_TOO_LONG;
+ advance(121000);assert(sends.size()==3 && capacityChanges==1 && gSchedulerState!=SCHED_FAULT);
+ advance(61000);assert(sends.size()==4 && lengths.back()==11 && gCapacityRatesTried==0);
+ // A candidate that still fails is not selected again indefinitely.
+ sendResult=RADIOLIB_ERR_DWELL_TIME_EXCEEDED;capacityImproves=false;
+ advance(361000);assert(gSchedulerState==SCHED_FAULT);
+ // Explicit no-capacity result pauses after the third failed transaction.
+ gCapacityFailures=0;gCapacityRatesTried=0;capacityWorks=false;
+ gSchedulerState=SCHED_SEND_UPLINK;gNextSchedulerTickMs=ticks;
+ loop();advance(121000);assert(gSchedulerState==SCHED_FAULT);
+}
+''')
+
+run('stock_join_hardware_recovery', stock_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();gRadio.joinResult=RADIOLIB_ERR_SPI_CMD_TIMEOUT;
+ advance(121000);
+ assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.attempted.size()==3 && durableLimit()==48);
+ advance(58000);assert(initializations==1);
+ gRadio.joinResult=0;advance(12000);
+ assert(initializations==2 && lwIsActivated() && gRadio.attempted.size()==4);
+ assert(gRadio.attempted.back()==48 && durableLimit()==64 && gRadio.uplinkCalls==1);
+}
+''')
+
+run('stock_rollover_wait_recovery', stock_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ assert(lwIsActivated() && gRadio.uplinkCalls==1);
+ ticks=1000;gNode.rxDelayStart=UINT32_MAX-1000;gNode.rxDelayEnd=UINT32_MAX-500;
+ gNode.dutyCycle=0;gNextSchedulerTickMs=ticks;gSchedulerState=SCHED_SEND_UPLINK;
+ assert(lwTimeUntilUplink()>0x7FFFFFFFUL);loop();
+ assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.uplinkCalls==1);
+ advance(59000);assert(initializations==1);
+ advance(12000);assert(initializations==2 && lwIsActivated() && gRadio.uplinkCalls==2);
+}
+''')
+
+# Use unchanged upstream payload arithmetic, validation and public setDatarate
+# with the actual firmware capacity selector. Modem/MAC application is faked.
+capacity_fixture = STOCK_FAKE.replace('struct LoRaWANChannel_t {};', r'''
+struct LoRaWANChannel_t { bool enabled=false;uint8_t dr=0,drMin=0,drMax=1; };
+''').replace('struct Band { uint8_t bandNum=1; };', r'''
+struct Band {
+ uint8_t bandNum=1,payloadLenMax[15]={11,53,125},dataRates[15]={};
+ Band() { std::fill(dataRates+3,dataRates+15,255); }
+};
+''').replace('uint8_t getMaxPayloadLen() { return 11; }', r'''
+ uint8_t fOptsUpLen=0;bool TS009=false,TS011=false,isMACPayload=false,phyRejectDataRate=false;
+ LoRaWANChannel_t channelPlan[2][16];
+ uint8_t getMaxPayloadLen();int16_t isValidUplink(uint8_t*,uint8_t);int16_t setDatarate(uint8_t);
+ int16_t execMacCommand(uint8_t,uint8_t* options,uint8_t,uint8_t* ack) {
+  *ack=phyRejectDataRate?0:2;
+  if(*ack) { channels[0].dr=options[0]>>4; }
+  return 0;
+ }
+''').replace('phyLayer(phy),band(region) {}', r'''
+phyLayer(phy),band(region) { for(auto& channel:channelPlan[0]) { channel.enabled=true; } }
+''').replace('  LoRaWANChannel_t channel;\n  int16_t result=', r'''
+  uint8_t total=uint8_t(len)+fOptsUpLen;
+  int16_t valid=isValidUplink(&total,1);if(valid)return valid;
+  LoRaWANChannel_t channel;
+  int16_t result=''')
+capacity_defines = '\n'.join(line for line in radio_header.splitlines()
+                            if line.startswith('#define RADIOLIB_LORAWAN_FPORT_') or
+                            (line.startswith('#define ') and line.split()[1] in {
+                                'RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES',
+                                'RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN',
+                                'RADIOLIB_LORAWAN_DATA_RATE_UNUSED',
+                                'RADIOLIB_LORAWAN_NUM_AVAILABLE_CHANNELS',
+                                'RADIOLIB_LORAWAN_MAC_LINK_ADR',
+                            })) + '\n#define RADIOLIB_MIN(a,b) ((a)<(b)?(a):(b))\n'
+capacity_methods = stock_methods + ''.join(radio_method(signature) for signature in (
+    'uint8_t LoRaWANNode::getMaxPayloadLen()',
+    'int16_t LoRaWANNode::isValidUplink(',
+    'int16_t LoRaWANNode::setDatarate(',
+))
+capacity_selector = lw[lw.index('static bool lwTryCapacityDataRate('):lw.rindex('#endif')]
+capacity_state = STOCK_STATE.replace('bool lwTryCapacityDataRate(size_t,uint16_t&) { return false; }', '')
+capacity_integration = (COMMON + error_constants + schema + capacity_defines + capacity_fixture +
+                        templates + capacity_methods + node_class + capacity_state + save + recover +
+                        activate + wrapper + capacity_selector)
+run('stock_payload_capacity_recovery', capacity_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ assert(lwIsActivated() && gRadio.uplinkCalls==1);
+ gNode.fOptsUpLen=12;assert(lwMaxPayloadBytes()==255);
+ advance(181000);
+ assert(gNode.channels[0].dr==1 && gRadio.uplinkCalls==1 && initializations==1);
+ advance(61000);
+ assert(gRadio.uplinkCalls>=2 && gNode.fOptsUpLen==12 && gSchedulerState!=SCHED_FAULT);
+ // Only the enabled uplink channel plan can authorize a candidate rate.
+ uint16_t tried=0;
+ for(auto& channel:gNode.channelPlan[0]) { channel.drMax=0; }
+ assert(!lwTryCapacityDataRate(11,tried));uint16_t allTried=tried;
+ assert(!lwTryCapacityDataRate(11,tried) && tried==allTried);
+ // When all allowed PHY settings reject the change, pause rather than spin.
+ for(auto& channel:gNode.channelPlan[0]) { channel.drMax=1; }
+ gNode.channels[0].dr=0;gNode.phyRejectDataRate=true;
+ gSchedulerState=SCHED_SEND_UPLINK;gCapacityFailures=0;gCapacityRatesTried=0;
+ unsigned rfBefore=gRadio.uplinkCalls;advance(121000);
+ assert(gSchedulerState==SCHED_FAULT && gRadio.uplinkCalls==rfBefore);
+}
+''')
+
+run('stock_payload_capacity_boundary_units', capacity_integration + r'''
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;assert(lwActivate());
+ gNode.fOptsUpLen=15;
+ // These synthetic N-values straddle the bound discussed in PR #47.
+ // They use the unchanged upstream setter, capacity and validation methods.
+ for(uint8_t regionalN=25;regionalN<=39;++regionalN) {
+  gRegion.payloadLenMax[1]=regionalN;uint16_t tried=0;
+  bool selected=lwTryCapacityDataRate(11,tried);
+  assert(selected==(regionalN>=26));
+  if(selected) {
+   assert(gNode.channels[0].dr==1 && gNode.getMaxPayloadLen()==regionalN-15);
+   uint8_t total=11+15;assert(gNode.isValidUplink(&total,1)==RADIOLIB_ERR_NONE);
+  }
+ }
+ gRegion.payloadLenMax[1]=26;uint16_t tried=0;
+ assert(lwTryCapacityDataRate(11,tried) && gNode.getMaxPayloadLen()==11);
+ uint8_t tooLong=12+15;
+ assert(gNode.isValidUplink(&tooLong,1)==RADIOLIB_ERR_PACKET_TOO_LONG);
+ assert(gNode.fOptsUpLen==15); // The firmware never alters the pending queue.
 }
 ''')

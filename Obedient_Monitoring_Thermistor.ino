@@ -22,6 +22,9 @@ static const uint32_t REPORT_RETRY_BACKOFF_MS = 5000UL;
 static uint32_t gReportWaitMs = REPORT_INTERVAL_MS;
 static uint32_t gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
 static uint8_t gUnavailableAttempts = 0;
+static uint8_t gJoinHardwareFailures = 0;
+static uint8_t gCapacityFailures = 0;
+static uint16_t gCapacityRatesTried = 0;
 static uint8_t gRecoveryAttempts = 0;
 static uint32_t gRecoveryStartedMs = 0;
 // Allow any abandoned Class A windows to expire before resetting radio state.
@@ -55,18 +58,48 @@ static void appFault(const __FlashStringHelper* reason) {
 
 static void scheduleReportRetry(uint32_t waitMs) {
   gLastReportMs = millis();
-  // Signed deadline arithmetic requires durations below half the timer range.
-  gReportWaitMs = waitMs > 0x7FFFFFFFUL ? 0x7FFFFFFFUL : waitMs;
+  // Library deferrals are validated and sliced by deferForAirtime(). Other
+  // callers supply the application's bounded retry/cadence intervals.
+  gReportWaitMs = waitMs;
   gSchedulerState = SCHED_WAIT_FOR_REPORT;
 }
 
 static void scheduleRadioRecovery() {
-  Serial.println(F("[LoRaWAN] No uplink progress; cooling down before radio recovery."));
+  Serial.println(F("[LoRaWAN] Cooling down before radio recovery."));
   gLoRaJoined = false;
   gPendingDownlinkLen = 0;
   gRecoveryAttempts = 0;
+  gJoinHardwareFailures = 0;
   gRecoveryStartedMs = millis();
   gSchedulerState = SCHED_RECOVER_RADIO;
+}
+
+static bool deferForAirtime(uint32_t waitMs) {
+  if(waitMs == 0) { return false; }
+  if(waitMs > 0x7FFFFFFFUL) {
+    Serial.println(F("[LoRaWAN] Invalid airtime wait exceeds the supported timer range."));
+    scheduleRadioRecovery();
+  } else {
+    gUnavailableAttempts = 0;
+    // Re-query eligibility at least once a minute; never force RF before the
+    // library permits it, even when its legitimate deferral is much longer.
+    scheduleReportRetry(waitMs > REPORT_INTERVAL_MS ? REPORT_INTERVAL_MS : waitMs);
+  }
+  return true;
+}
+
+static bool hardwareLoRaError(int16_t state) {
+  switch(state) {
+    case RADIOLIB_ERR_TX_TIMEOUT:
+    case RADIOLIB_ERR_RX_TIMEOUT:
+    case RADIOLIB_ERR_SPI_WRITE_FAILED:
+    case RADIOLIB_ERR_SPI_CMD_TIMEOUT:
+    case RADIOLIB_ERR_SPI_CMD_INVALID:
+    case RADIOLIB_ERR_SPI_CMD_FAILED:
+    case RADIOLIB_ERR_CHIP_NOT_FOUND:
+      return true;
+    default: return false;
+  }
 }
 
 static bool permanentLoRaError(int16_t state) {
@@ -112,6 +145,9 @@ static bool ensureJoined() {
 
   if(gLoRaJoined) {
     gUnavailableAttempts = 0;
+    gJoinHardwareFailures = 0;
+    gCapacityFailures = 0;
+    gCapacityRatesTried = 0;
     gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
     gReportWaitMs = REPORT_INTERVAL_MS;
     gLastReportMs = millis() - REPORT_INTERVAL_MS;
@@ -123,6 +159,10 @@ static bool ensureJoined() {
   Serial.println(lwLastActivationState());
   if(!lwPersistenceHealthy() || permanentLoRaError(lwLastActivationState())) {
     appFault(F("Join stopped: resolve persistence/configuration error before reset."));
+  } else if(hardwareLoRaError(lwLastActivationState())) {
+    if(++gJoinHardwareFailures >= 3) { scheduleRadioRecovery(); }
+  } else {
+    gJoinHardwareFailures = 0;  // No JoinAccept is a network retry, not a radio fault.
   }
   return false;
 }
@@ -229,11 +269,7 @@ void loop() {
 
     case SCHED_SEND_UPLINK: {
       uint32_t waitMs = lwTimeUntilUplink();
-      if(waitMs > 0) {
-        gUnavailableAttempts = 0;
-        scheduleReportRetry(waitMs);
-        return;
-      }
+      if(deferForAirtime(waitMs)) { return; }
       const size_t payloadLen = sizeof(HELLO_WORLD_PAYLOAD) - 1;
       size_t maxPayloadBytes = lwMaxPayloadBytes();
       bool macOnly = payloadLen > maxPayloadBytes;
@@ -252,6 +288,8 @@ void loop() {
       if(state < 0) {
         Serial.print(F("[LoRaWAN] Send failed, code "));
         Serial.println(state);
+        bool capacityError = state == RADIOLIB_ERR_PACKET_TOO_LONG || state == RADIOLIB_ERR_DWELL_TIME_EXCEEDED;
+        if(!capacityError) { gCapacityFailures = 0; }
 
         if(permanentLoRaError(state)) {
           appFault(F("Permanent uplink configuration/API error."));
@@ -268,15 +306,18 @@ void loop() {
 
         if(state == RADIOLIB_ERR_UPLINK_UNAVAILABLE) {
           waitMs = lwTimeUntilUplink();
-          if(waitMs == 0) {
-            if(++gUnavailableAttempts >= 3) { scheduleRadioRecovery(); return; }
-          } else {
-            gUnavailableAttempts = 0;  // An actual airtime deferral, not stuck state.
-          }
-          scheduleReportRetry(waitMs > REPORT_RETRY_BACKOFF_MS ? waitMs : REPORT_RETRY_BACKOFF_MS);
-        } else if(state == RADIOLIB_ERR_PACKET_TOO_LONG || state == RADIOLIB_ERR_DWELL_TIME_EXCEEDED) {
+          if(deferForAirtime(waitMs)) { return; }
+          if(++gUnavailableAttempts >= 3) { scheduleRadioRecovery(); return; }
+          scheduleReportRetry(REPORT_RETRY_BACKOFF_MS);
+        } else if(capacityError) {
           gUnavailableAttempts = 0;
-          // Re-evaluate the live limit next time; do not force a radio reset.
+          if(++gCapacityFailures >= 3) {
+            gCapacityFailures = 0;
+            if(!lwTryCapacityDataRate(payloadLen, gCapacityRatesTried)) {
+              appFault(F("No permitted data rate restores payload capacity. Check network/data-rate configuration."));
+              return;
+            }
+          }
           scheduleReportRetry(REPORT_INTERVAL_MS);
         } else {
           gUnavailableAttempts = 0;
@@ -293,6 +334,8 @@ void loop() {
       Serial.println(F("[LoRaWAN] Network receipt requires console verification."));
       gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
       gUnavailableAttempts = 0;
+      gCapacityFailures = 0;
+      gCapacityRatesTried = 0;
       // Persistent MAC responses may need multiple successful transactions.
       // Keep the text pending and use the normal cadence for maintenance too.
       gLastReportMs = now;

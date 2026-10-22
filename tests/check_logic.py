@@ -162,6 +162,11 @@ void reset() {
  gRetryBackoffMs=5000; gMacOnlyAttempts=0; gReportWaitMs=60000; setup();
 }
 int main() {
+ // Waiting for a tick sleeps through the idle interval, including rollover.
+ reset(); gNextSchedulerTickMs=ticks+40;
+ uint32_t idleStart=ticks; loop(); assert(uint32_t(ticks-idleStart)==40);
+ reset(); ticks=UINT32_MAX-19; gNextSchedulerTickMs=ticks+40;
+ idleStart=ticks; loop(); assert(uint32_t(ticks-idleStart)==40);
  reset(); advance(500); assert(sends.size()==1 && gPendingDownlinkLen==0);
  uint32_t first=sends[0]; advance(59000); assert(sends.size()==1);
  advance(1200); assert(sends.size()==2 && sends[1]-first>=60000 && sends[1]-first<=60100);

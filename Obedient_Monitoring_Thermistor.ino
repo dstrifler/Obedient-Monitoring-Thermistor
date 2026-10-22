@@ -23,10 +23,13 @@ static uint32_t gReportWaitMs = REPORT_INTERVAL_MS;
 static uint32_t gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
 static uint8_t gUnavailableAttempts = 0;
 static uint8_t gJoinHardwareFailures = 0;
+static uint8_t gUplinkHardwareFailures = 0;
 static uint8_t gCapacityFailures = 0;
 static uint16_t gCapacityRatesTried = 0;
 static uint8_t gRecoveryAttempts = 0;
 static uint32_t gRecoveryStartedMs = 0;
+static uint32_t gRolloverWaitStartedMs = 0;
+static uint32_t gLastSchedulerTimeMs = 0;
 // Allow any abandoned Class A windows to expire before resetting radio state.
 static const uint32_t RADIO_RECOVERY_COOLDOWN_MS = 60000UL;
 static uint32_t gFaultLogMs = 0;
@@ -38,6 +41,7 @@ enum SchedulerState : uint8_t {
   SCHED_SEND_UPLINK,
   SCHED_PROCESS_DOWNLINK,
   SCHED_RECOVER_RADIO,
+  SCHED_WAIT_TIMER_ROLLOVER,
   SCHED_FAULT
 };
 
@@ -70,8 +74,23 @@ static void scheduleRadioRecovery() {
   gPendingDownlinkLen = 0;
   gRecoveryAttempts = 0;
   gJoinHardwareFailures = 0;
+  gUplinkHardwareFailures = 0;
   gRecoveryStartedMs = millis();
   gSchedulerState = SCHED_RECOVER_RADIO;
+}
+
+static void scheduleTimerRolloverWait() {
+  const uint32_t started = millis();
+  if(started < UINT32_MAX - LW_TRANSACTION_GUARD_MS) {
+    // The boundary may have passed between the wrapper's guard and this call.
+    scheduleRadioRecovery();
+    return;
+  }
+  Serial.println(F("[LoRaWAN] Pausing radio work until timer rollover."));
+  gLoRaJoined = false;
+  gPendingDownlinkLen = 0;
+  gRolloverWaitStartedMs = started;
+  gSchedulerState = SCHED_WAIT_TIMER_ROLLOVER;
 }
 
 static bool deferForAirtime(uint32_t waitMs) {
@@ -146,6 +165,7 @@ static bool ensureJoined() {
   if(gLoRaJoined) {
     gUnavailableAttempts = 0;
     gJoinHardwareFailures = 0;
+    gUplinkHardwareFailures = 0;
     gCapacityFailures = 0;
     gCapacityRatesTried = 0;
     gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
@@ -159,6 +179,8 @@ static bool ensureJoined() {
   Serial.println(lwLastActivationState());
   if(!lwPersistenceHealthy() || permanentLoRaError(lwLastActivationState())) {
     appFault(F("Join stopped: resolve persistence/configuration error before reset."));
+  } else if(lwLastActivationState() == LW_ERR_TIMER_ROLLOVER) {
+    scheduleTimerRolloverWait();
   } else if(hardwareLoRaError(lwLastActivationState())) {
     if(++gJoinHardwareFailures >= 3) { scheduleRadioRecovery(); }
   } else {
@@ -216,6 +238,7 @@ void setup() {
   gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;
   gLastReportMs = millis() - REPORT_INTERVAL_MS;
   gNextSchedulerTickMs = millis();
+  gLastSchedulerTimeMs = gNextSchedulerTickMs;
   gSchedulerState = SCHED_WAIT_FOR_JOIN;
 
   Serial.println(F("[LoRaWAN] Join deferred to scheduler."));
@@ -238,6 +261,17 @@ void loop() {
     }
   }
   gNextSchedulerTickMs = now + LOOP_SLICE_MS;
+
+  if(gSchedulerState != SCHED_FAULT && gSchedulerState != SCHED_WAIT_TIMER_ROLLOVER) {
+    if(now < gLastSchedulerTimeMs) {
+      // Also discard old absolute library timestamps if the loop was suspended
+      // across the boundary and missed the pre-wrap pause.
+      scheduleRadioRecovery();
+    } else if(lwTimerRolloverPending()) {
+      scheduleTimerRolloverWait();
+    }
+  }
+  gLastSchedulerTimeMs = now;
 
   switch(gSchedulerState) {
     case SCHED_WAIT_FOR_JOIN:
@@ -290,9 +324,15 @@ void loop() {
         Serial.println(state);
         bool capacityError = state == RADIOLIB_ERR_PACKET_TOO_LONG || state == RADIOLIB_ERR_DWELL_TIME_EXCEEDED;
         if(!capacityError) { gCapacityFailures = 0; }
+        if(!hardwareLoRaError(state)) { gUplinkHardwareFailures = 0; }
 
         if(permanentLoRaError(state)) {
           appFault(F("Permanent uplink configuration/API error."));
+          return;
+        }
+
+        if(state == LW_ERR_TIMER_ROLLOVER) {
+          scheduleTimerRolloverWait();
           return;
         }
 
@@ -321,6 +361,10 @@ void loop() {
           scheduleReportRetry(REPORT_INTERVAL_MS);
         } else {
           gUnavailableAttempts = 0;
+          if(hardwareLoRaError(state) && ++gUplinkHardwareFailures >= 3) {
+            scheduleRadioRecovery();
+            return;
+          }
           // A receive-side failure can follow an actual transmission. Avoid
           // generating a new frame every five seconds during a lasting fault.
           scheduleReportRetry(gRetryBackoffMs);
@@ -334,6 +378,7 @@ void loop() {
       Serial.println(F("[LoRaWAN] Network receipt requires console verification."));
       gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
       gUnavailableAttempts = 0;
+      gUplinkHardwareFailures = 0;
       gCapacityFailures = 0;
       gCapacityRatesTried = 0;
       // Persistent MAC responses may need multiple successful transactions.
@@ -355,6 +400,10 @@ void loop() {
 
       gSchedulerState = SCHED_WAIT_FOR_REPORT;
       break;
+
+    case SCHED_WAIT_TIMER_ROLLOVER:
+      if(now < gRolloverWaitStartedMs) { scheduleRadioRecovery(); }
+      return;
 
     case SCHED_RECOVER_RADIO:
       if(now - gRecoveryStartedMs < RADIO_RECOVERY_COOLDOWN_MS) { return; }

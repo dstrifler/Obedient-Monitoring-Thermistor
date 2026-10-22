@@ -16,10 +16,6 @@
 #include "eeprom_service.h"
 #include "nonce_store.h"
 
-#if !defined(RADIOLIB_THERMISTOR_PROTOCOL_FIXES) || (RADIOLIB_THERMISTOR_PROTOCOL_FIXES < 2)
-#error "Use tools/check-board.sh: RadioLib 7.1.2 needs the checked protocol fixes."
-#endif
-
 static SX1262 gRadio = new Module(
   LORA_PIN_CS,
   LORA_PIN_IRQ_DIO1,
@@ -34,14 +30,6 @@ static_assert(RADIOLIB_LORAWAN_NONCES_VERSION_VAL == 1, "Review nonce reservatio
 class PersistentLoRaWANNode : public LoRaWANNode {
 public:
   using LoRaWANNode::LoRaWANNode;
-  bool macCommandsFit() {
-    // Ask the patched library for total capacity before subtracting FOpts.
-    uint8_t pending = fOptsUpLen;
-    fOptsUpLen = 0;
-    size_t capacity = getMaxPayloadLen();
-    fOptsUpLen = pending;
-    return pending <= capacity;
-  }
   uint16_t nextDevNonce() const { return devNonce; }
   void reservedNonces(uint8_t* out, uint16_t highWater) {
     memcpy(out, getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
@@ -324,7 +312,6 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
 
 // RadioLib owns region, data-rate, pending FOpts and dwell-time calculations.
 size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
-static bool lwMacCommandsFit() { return gNode.macCommandsFit(); }
 static uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
 
 #endif

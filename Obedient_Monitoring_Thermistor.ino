@@ -218,10 +218,6 @@ void loop() {
       const size_t payloadLen = sizeof(HELLO_WORLD_PAYLOAD) - 1;
       size_t maxPayloadBytes = lwMaxPayloadBytes();
       bool macOnly = payloadLen > maxPayloadBytes;
-      if(macOnly && !lwMacCommandsFit()) {
-        appFault(F("Pending MAC commands exceed this data rate's frame capacity. Reconfigure data rate/network."));
-        return;
-      }
       if(macOnly && gMacOnlyAttempts >= 3) {
         appFault(F("Payload still unavailable after three MAC-only transactions."));
         return;

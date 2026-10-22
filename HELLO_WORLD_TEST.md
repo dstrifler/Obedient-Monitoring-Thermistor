@@ -41,13 +41,32 @@ preserving that reservation. The nonce space never wraps. Batching reduces
 flash writes; frequent resets deliberately consume unused reserved values.
 
 Two 8-KiB pages at `0xFA000` and `0xFC000` hold append-only 64-byte records with
-CRC, sequence number and a commit word written last. Recovery retains the
-highest complete CRC-valid reservation even if its commit marker is damaged or
-unfinished. It never rolls back past that reservation. Any nonempty record with
-an incomplete or invalid body stops joining, even if an older valid record
-exists; this deliberately favors nonce safety over automatic recovery. Page
-rollover erases only the page that does not contain the latest retained reservation. Flash operation
-results and committed records are checked. There is no flash write per uplink.
+CRC, sequence number and a commit word written last. The final two slots on each
+page are reserved for CRC-protected erase-intent and activation records.
+
+Before erasing the stale page, the current page durably records its target and
+transition sequence. The erased page receives a verified copy of the current
+nonce reservation. A separate activation record on the owner page transfers
+authority before new reservations can authorize transmission on the target.
+After an interrupted erase or snapshot copy, boot retains the owner page,
+ignores only the authorized target's debris, and retries reclamation before
+saving a new reservation. The newest valid transition determines which page is
+current; an old transition cannot authorize ignoring the newer current page.
+
+Recovery retains a complete CRC-valid reservation even if its commit marker is
+damaged or unfinished. Ambiguous bodies on the current page, or ambiguous
+activation metadata, still stop joining rather than guess or roll back. This
+can require explicit recovery after some interrupted metadata/data writes;
+automatic recovery is guaranteed here for stale-page erase/copy interruption,
+not every flash failure. Flash operations and committed records are checked.
+There is no flash write per uplink and no additional flash page is reserved.
+
+Legacy journals with free final slots adopt the new protocol when they roll
+over. If an old journal already occupies either reserved transition slot on the
+current full page, automatic reclamation stops with an explicit migration error.
+It does not erase history to make room. A journal already damaged by an erase
+performed without intent metadata also remains ambiguous and requires recovery.
+
 The legacy EEPROM page at `0xFE000`, including saved application settings, stays
 untouched. Valid legacy nonce records migrate with checked reads. Historical
 nonces lost by the old firmware cannot be reconstructed.
@@ -101,6 +120,9 @@ nonce reservation before TX, nonce exhaustion, absent/real downlinks, scheduler
 cadence/rollover/retries/eligibility/faults, and independent RTC rate checks.
 Regression checks compile actual patched RadioLib payload and transmission/
 eligibility methods, including timer rollover, and test the ABP compile guard.
+Reclamation tests cover bit-level stale-page erase damage with commit words
+intact, repeated interruption/reboot/retry, and every program byte of the
+intent/snapshot/activation/new-reservation sequence.
 These host fakes do not validate physical flash behavior, crystal accuracy or RF.
 
 ## Bench check

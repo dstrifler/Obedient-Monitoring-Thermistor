@@ -56,6 +56,7 @@ public:
  std::vector<uint8_t> data;
  int cut=-1;
  bool readFailure=false, eraseFailure=false;
+ int eraseBitMode=0;
  FlashIAPBlockDevice(uint32_t, uint32_t size): data(size,255) {}
  int init() { return 0; }
  uint32_t get_program_size() { return 4; }
@@ -74,6 +75,11 @@ public:
    return 0;
  }
  int erase(uint32_t offset,size_t size) {
+   if(eraseBitMode==1) { data.at(offset+8)|=0x80; return -1; }
+   if(eraseBitMode==2) {
+     for(size_t i=0;i<size;i+=17) data.at(offset+i)|=uint8_t(1U<<((i/17)%8));
+     return -1;
+   }
    if(eraseFailure) { std::fill(data.begin()+offset,data.begin()+offset+size/2,255); return -1; }
    std::fill(data.begin()+offset,data.begin()+offset+size,255); return 0;
  }
@@ -107,7 +113,7 @@ int main() {
  gNonceFlash.data[gNonceLatestOffset+8]^=1; assert(!nonceStoreScan());
  gNonceFlash.data=baseline; assert(nonceStoreScan());
  // Fill the current page; interrupted erase of the other page preserves it.
- while(gNonceLatestOffset<8128) { ++b[0]; assert(nonceStoreSave(b)); }
+ while(gNonceLatestOffset<int32_t((NONCE_DATA_SLOTS-1)*NONCE_RECORD_BYTES)) { ++b[0]; assert(nonceStoreSave(b)); }
  gNonceFlash.eraseFailure=true; ++b[0]; assert(!nonceStoreSave(b));
  gNonceFlash.eraseFailure=false; assert(nonceStoreScan()); assert(gNonceSaved[0]==uint8_t(b[0]-1));
  gNonceFlash.readFailure=true; assert(!nonceStoreSave(a));
@@ -441,3 +447,93 @@ int main() {
  assert(ticks==1399 && node.rxDelayEnd==1399);
 }
 ''')
+
+run('stale_page_erase_recovery', COMMON + JOURNAL_FAKE + journal + r'''
+int main() {
+ assert(nonceStoreScan());
+ uint8_t value[18]={};
+ // Fill A, transition to B, then fill B. A now contains real stale records
+ // and old transition metadata, unlike an interrupted first-ever blank erase.
+ for(uint32_t i=1;i<=2*NONCE_DATA_SLOTS-1;++i) {
+   value[0]=i&255; value[1]=i>>8; assert(nonceStoreSave(value));
+ }
+ assert(gNonceLatestOffset==int32_t(NONCE_PAGE_BYTES+(NONCE_DATA_SLOTS-1)*NONCE_RECORD_BYTES));
+ auto full=gNonceFlash.data;
+ uint8_t previous[18]; memcpy(previous,value,18);
+ uint16_t next=(uint16_t(value[1])<<8 | value[0])+1;
+ value[0]=next&255; value[1]=next>>8;
+ for(int mode=1;mode<=2;++mode) {
+   gNonceFlash.data=full; gNonceFlash.eraseBitMode=0; assert(nonceStoreScan());
+   gNonceFlash.eraseBitMode=mode; assert(!nonceStoreSave(value));
+   if(mode==1) {
+     NonceRecord stale; memcpy(&stale,gNonceFlash.data.data(),sizeof(stale));
+     assert(stale.committed==NONCE_COMMITTED && !nonceRecordBodyValid(stale));
+   }
+   // Retry even if power fails during the same stale-page erase again.
+   assert(nonceStoreScan() && gNonceReclaimIntent>=0 && memcmp(gNonceSaved,previous,18)==0);
+   assert(!nonceStoreSave(value)); assert(nonceStoreScan());
+   gNonceFlash.eraseBitMode=0; assert(nonceStoreSave(value));
+   assert(nonceStoreScan() && memcmp(gNonceSaved,value,18)==0);
+   // Current page damage must never be treated as stale erase debris.
+   gNonceFlash.data[gNonceLatestOffset+8]^=1; assert(!nonceStoreScan());
+ }
+ // Power loss at every program byte of intent, snapshot, activation and the
+ // new reservation: recovery either retains the safe bound or stops; no rollback.
+ for(int cut=0;cut<256;++cut) {
+   gNonceFlash.data=full; gNonceFlash.cut=-1; gNonceFlash.eraseBitMode=0;
+   assert(nonceStoreScan()); gNonceFlash.cut=cut;
+   bool saved=nonceStoreSave(value); gNonceFlash.cut=-1;
+   bool recovered=nonceStoreScan();
+   if(saved) { assert(recovered && memcmp(gNonceSaved,value,18)==0); }
+   if(recovered) {
+     assert(memcmp(gNonceSaved,value,18)==0 || memcmp(gNonceSaved,previous,18)==0);
+   }
+   // An interrupted copy on the newly erased, not-yet-active page is safe to retry.
+   if(cut>=64 && cut<128) {
+     assert(recovered && gNonceReclaimIntent>=0);
+     assert(nonceStoreSave(value)); assert(nonceStoreScan());
+     assert(memcmp(gNonceSaved,value,18)==0);
+   }
+ }
+}
+''', {'Arduino.h':'','RadioLib.h':'','FlashIAPBlockDevice.h':''})
+
+run('journal_transition_compatibility', COMMON + JOURNAL_FAKE + journal + r'''
+int main() {
+ uint8_t value[18]={};
+ // Legacy records with unused final slots migrate without touching EEPROM.
+ for(uint32_t slot=0;slot<NONCE_DATA_SLOTS;++slot) {
+   value[0]=slot+1;
+   assert(nonceWriteRecord(slot*NONCE_RECORD_BYTES,NONCE_MAGIC,slot+1,value));
+ }
+ assert(nonceStoreScan()); ++value[0]; assert(nonceStoreSave(value));
+ assert(nonceStoreScan() && memcmp(gNonceSaved,value,18)==0);
+ // A legacy page using the transition slots must stop without erasing it.
+ std::fill(gNonceFlash.data.begin(),gNonceFlash.data.end(),255);
+ for(uint32_t slot=0;slot<NONCE_PAGE_BYTES/NONCE_RECORD_BYTES;++slot) {
+   value[0]=slot+1;
+   assert(nonceWriteRecord(slot*NONCE_RECORD_BYTES,NONCE_MAGIC,slot+1,value));
+ }
+ assert(nonceStoreScan()); auto full=gNonceFlash.data;
+ ++value[0]; assert(!nonceStoreSave(value)); assert(full==gNonceFlash.data);
+ // Transition generations remain ordered through uint32_t sequence rollover.
+ std::fill(gNonceFlash.data.begin(),gNonceFlash.data.end(),255);
+ for(uint32_t slot=0;slot<NONCE_DATA_SLOTS;++slot) {
+   value[0]=slot+1;
+   assert(nonceWriteRecord(slot*NONCE_RECORD_BYTES,NONCE_MAGIC,
+     UINT32_MAX-(NONCE_DATA_SLOTS-1)+slot,value));
+ }
+ assert(nonceStoreScan() && gNonceSequence==UINT32_MAX);
+ ++value[0]; assert(nonceStoreSave(value));
+ assert(nonceStoreScan() && gNonceSequence==3 && memcmp(gNonceSaved,value,18)==0);
+ // Reclaim in the reverse direction too, with populated stale records.
+ while(gNonceLatestOffset%NONCE_PAGE_BYTES<int32_t((NONCE_DATA_SLOTS-1)*NONCE_RECORD_BYTES)) {
+   ++value[0]; assert(nonceStoreSave(value));
+ }
+ uint8_t before[18]; memcpy(before,value,18); ++value[0];
+ gNonceFlash.eraseBitMode=2; assert(!nonceStoreSave(value));
+ assert(nonceStoreScan() && memcmp(gNonceSaved,before,18)==0);
+ gNonceFlash.eraseBitMode=0; assert(nonceStoreSave(value));
+ assert(nonceStoreScan() && memcmp(gNonceSaved,value,18)==0);
+}
+''', {'Arduino.h':'','RadioLib.h':'','FlashIAPBlockDevice.h':''})

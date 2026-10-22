@@ -103,13 +103,21 @@ rejoins after reboot.
 ## Error handling
 
 Invalid API/configuration errors enter a visible paused state. Airtime deferrals
-use RadioLib's time-until-uplink result. Payload/dwell errors retry after a minute;
-other transient send failures back off from five seconds to a five-minute cap.
+use RadioLib's time-until-uplink result. Valid positive waits are re-queried at
+least once a minute, without transmitting early. A reported wait greater than
+`0x7FFFFFFF` exceeds the application's supported timer range and enters recovery
+instead of becoming a multi-day application sleep. Both the initial eligibility
+check and the result after `UPLINK_UNAVAILABLE` use this validation.
+Other transient send failures back off from five seconds to a five-minute cap.
 Successful activation resets that backoff to five seconds.
 A receive-side error may occur after actual transmission, so such retries can
 produce additional application messages. Lost activation returns to joining.
-No-join-accept retries remain one minute apart. Radio initialization gets three
-attempts. The idle scheduler yields to the RTOS instead of continuously spinning.
+No-join-accept retries remain one minute apart. Three consecutive join hardware
+errors (TX/RX timeout, SPI write/command errors, or chip-not-found) enter the same
+cooldown/recovery state as a stuck uplink. Ordinary network join failures clear
+that hardware-error streak. Successful joins reset the streak and retry backoff.
+Radio initialization gets three attempts. The idle scheduler yields to the RTOS
+instead of continuously spinning.
 
 Three consecutive `UPLINK_UNAVAILABLE` results with zero reported airtime wait
 enter an application recovery state. A positive airtime wait clears this count.
@@ -122,6 +130,17 @@ three attempts, a minute apart. Persistence failure stops recovery immediately;
 radio initialization failure after the third attempt enters the paused state.
 Flash history is retained throughout. Repeated hardware faults can still prevent
 rejoining; recovery is not proof of RF connectivity.
+
+After three consecutive payload-size or dwell-time rejections, the firmware
+tries a data-rate candidate through public `setDatarate()`. Candidates must have
+regional payload capacity for the fixed text plus the maximum 15-byte FOpts
+queue; the library verifies the enabled channel plan and radio support. A
+candidate's reported live capacity must fit the text and stay within its
+regional maximum. Each rate is considered at most once until a successful
+transaction or new join resets the candidate mask. Retry remains one minute
+apart. If no candidate works, the firmware pauses with an explicit capacity
+error. MAC queues are retained. Choosing a higher data rate can reduce link
+range; normal network ADR remains enabled.
 
 ## Build and validation
 
@@ -151,10 +170,12 @@ where implemented:
 
 - `getMaxPayloadLen()` can wrap to a large unsigned value when pending MAC
   commands exceed the frame capacity. The firmware no longer probes capacity
-  by temporarily changing the node's pending-command state.
+  by temporarily changing the node's pending-command state. Repeated rejection
+  now triggers the bounded public data-rate selection described above.
 - Internal absolute timer comparisons are not consistently rollover safe.
   The application's own scheduler uses rollover-safe arithmetic, but that does
   not establish correct library behavior across the roughly 49.7-day wrap.
+  Out-of-range reported waits are handled by firmware recovery.
 - TX or early RX errors can leave the library's transaction unavailable. The
   firmware detects repeated zero-wait unavailable results and recovers by
   recreating its node and rejoining, as described above.
@@ -162,9 +183,9 @@ where implemented:
   detects unchanged nonce state on failed activation and restores the verified
   reservation bound through the public API before permitting another attempt.
 
-The library source remains unchanged. Payload-limit arithmetic and library timer
-rollover remain unresolved integration limitations; these changes address the
-firmware's nonce and recovery policies without changing those implementations.
+The library source remains unchanged. The firmware handles repeated capacity
+rejections and invalid reported waits through public APIs. Its recovery policies
+do not change the library's internal payload arithmetic or timer comparisons.
 
 The board script uses the local environment's Arduino CLI 1.3.1, SparkFun Apollo3
 release 2.2.1 and RadioLib 7.1.2. The core archive internally reports 2.0.0. GCC
@@ -182,7 +203,12 @@ normal no-JoinAccept progression, restore rejection, exhaustion, failed writes,
 node recreation with JoinNonce retention, and scheduler recovery after a timeout.
 Scheduler checks also cover eight persistent MAC-only transactions and resuming
 text, reset backoff after rejoin, real airtime deferrals, bounded recovery errors,
-and cooldown across timer rollover. A dependency check accepts the stock
+and cooldown across timer rollover. Additional checks cover periodic long-wait
+rechecks without early RF, invalid waits from both eligibility paths, join hardware
+error recovery with nonce retention, normal no-JoinAccept handling, and bounded
+capacity recovery. Capacity integration tests execute the unchanged upstream
+payload, validation and public data-rate setter methods, including restoration
+of transmission and exhaustion of permitted candidates. A dependency check accepts the stock
 library and rejects edits to the formerly patched files without modifying them.
 Reclamation tests cover bit-level stale-page erase damage with commit words
 intact, repeated interruption/reboot/retry, and every program byte of the

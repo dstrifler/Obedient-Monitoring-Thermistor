@@ -340,4 +340,28 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
 size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
 static uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
 
+static bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates) {
+  static_assert(RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES <= 16, "Capacity retry mask needs updating");
+  for(uint8_t dr = 0; dr < RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES; ++dr) {
+    uint16_t bit = static_cast<uint16_t>(1U << dr);
+    if(triedRates & bit) { continue; }
+    triedRates |= bit;
+    // Seek room for the fixed text and even a full FOpts queue. Skip unused
+    // entries; setDatarate() checks the enabled channel plan and radio support.
+    if(gRegion.dataRates[dr] == RADIOLIB_LORAWAN_DATA_RATE_UNUSED ||
+       gRegion.payloadLenMax[dr] < requiredBytes + RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN) { continue; }
+    int16_t state = gNode.setDatarate(dr);
+    if(state != RADIOLIB_ERR_NONE) {
+      Serial.print(F("[Payload] Data-rate candidate rejected, code ")); Serial.println(state);
+      continue;
+    }
+    size_t available = gNode.getMaxPayloadLen();
+    if(available >= requiredBytes && available <= gRegion.payloadLenMax[dr]) {
+      Serial.print(F("[Payload] Retrying at permitted data rate ")); Serial.println(dr);
+      return true;
+    }
+  }
+  return false;
+}
+
 #endif

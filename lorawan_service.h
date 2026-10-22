@@ -16,6 +16,7 @@
 #include "eeprom_service.h"
 #include "nonce_store.h"
 #include "lorawan_timer.h"
+#include "log_service.h"
 
 static SX1262 gRadio = new Module(
   LORA_PIN_CS,
@@ -96,27 +97,25 @@ static const int16_t LW_ERR_INVALID_ARGUMENT = (int16_t)(INT16_MIN + 42);
 
 bool lwBegin() {
   if((LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)) {
-    Serial.println(F("[LoRaWAN] Invalid uplink FPort. Must be 1..223."));
+    LOG_ERROR("LoRaWAN", "Invalid uplink FPort. Must be 1..223.");
     return false;
   }
 
   if(LORA_USE_SPI != 1) {
-    Serial.println(F("[LoRaWAN] SPI bus disabled or missing in LORA_CONFIG."));
+    LOG_ERROR("LoRaWAN", "SPI bus disabled or missing in LORA_CONFIG.");
     return false;
   }
 
-  Serial.print(F("[LoRaWAN] Initialise the radio ... "));
+  LOG_DEBUG("LoRaWAN", "Initializing radio with XTAL reference.");
   // NM180100 uses a 32 MHz crystal (datasheet section 7.3). Select RadioLib's
   // documented XTAL mode before every init, including recovery, to suppress
   // the default 1.6 V TCXO control on DIO3.
   gRadio.XTAL = true;
   int16_t radioState = gRadio.begin();
   if(radioState != RADIOLIB_ERR_NONE) {
-    Serial.print(F("failed, code "));
-    Serial.println(radioState);
+    LOG_WARN("LoRaWAN", "Radio initialization failed: code=%d", int(radioState));
     return false;
   }
-  Serial.println(F("success!"));
 
   // EEPROM must already be initialized by app bootstrap (eepromBootstrap()).
 
@@ -125,8 +124,7 @@ bool lwBegin() {
   // appear to work in logs while no RF packet is actually radiated.
   int16_t state = gRadio.setDio2AsRfSwitch();
   if((state != RADIOLIB_ERR_NONE) && (state != RADIOLIB_ERR_UNSUPPORTED)) {
-    Serial.print(F("[LoRaWAN] RF switch setup failed, code "));
-    Serial.println(state);
+    LOG_WARN("LoRaWAN", "RF switch setup failed: code=%d", int(state));
     return false;
   }
 
@@ -145,11 +143,11 @@ bool lwBegin() {
 #endif
 
   if(state != RADIOLIB_ERR_NONE) {
-    Serial.print(F("[LoRaWAN] Node begin failed, code "));
-    Serial.println(state);
+    LOG_WARN("LoRaWAN", "Node begin failed: code=%d", int(state));
     return false;
   }
 
+  LOG_INFO("LoRaWAN", "Radio and OTAA node initialized.");
   return true;
 }
 
@@ -166,7 +164,7 @@ static bool lwSaveNonces() {
   gNode.reservedNonces(gLWnonces, gReservedNonceLimit);
   gPersistenceHealthy = nonceStoreSave(gLWnonces);
   if(!gPersistenceHealthy) {
-    Serial.println(F("[Persistence] Write/verify failed. Joining disabled."));
+    LOG_ERROR("Persistence", "Write/verify failed. Joining disabled.");
   }
   return gPersistenceHealthy;
 }
@@ -188,11 +186,11 @@ int16_t lwRestore() {
     if(legacy[EEPROM_LORAWAN_FLAG_ADDR] == EEPROM_LORAWAN_FLAG_VALUE) {
       memcpy(gLWnonces, legacy, sizeof(gLWnonces));
       haveNonces = true;
-      Serial.println(F("[Persistence] Migrating legacy nonce history; prior unsaved attempts cannot be recovered."));
+      LOG_WARN("Persistence", "Migrating legacy nonce history; prior unsaved attempts cannot be recovered.");
     } else {
       for(size_t i = 0; i < sizeof(legacy); ++i) {
         if(legacy[i] != 0xFF) {
-          Serial.println(F("[Persistence] Unrecognized legacy data; explicit recovery required."));
+          LOG_ERROR("Persistence", "Unrecognized legacy data; explicit recovery required.");
           gPersistenceHealthy = false;
           return LW_ERR_PERSISTENCE;
         }
@@ -202,14 +200,14 @@ int16_t lwRestore() {
   if(haveNonces) {
     int16_t state = gNode.setBufferNonces(gLWnonces);
     if(state != RADIOLIB_ERR_NONE) {
-      Serial.println(F("[Persistence] Nonce restore rejected; history retained. No automatic reset."));
+      LOG_ERROR("Persistence", "Nonce restore rejected; history retained. No automatic reset.");
       gPersistenceHealthy = false;
       return state;
     }
   }
   gReservedNonceLimit = gNode.nextDevNonce();
   if(haveNonces && !gNonceStoreHasRecord && !lwSaveNonces()) { return LW_ERR_PERSISTENCE; }
-  Serial.println(F("[Persistence] Nonce history ready; a fresh OTAA session will be joined."));
+  LOG_INFO("Persistence", "Nonce history ready; a fresh OTAA session will be joined.");
   return RADIOLIB_ERR_NONE;
 }
 
@@ -233,15 +231,14 @@ bool lwActivate() {
 
   if(lwTimerRolloverPending()) { gLastActivationState = LW_ERR_TIMER_ROLLOVER; return false; }
 
-  Serial.println(F("[LoRaWAN] Attempting network join ..."));
+  LOG_INFO("LoRaWAN", "Attempting network join ...");
   gRadio.standby();
-  clockLogTimestamp(F("OTAA/ABP activation begin"));
 
 #if (LORA_USE_OTAA == 1)
   if(!gPersistenceHealthy) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
   uint16_t next = gNode.nextDevNonce();
   if(next == UINT16_MAX) {
-    Serial.println(F("[Persistence] DevNonce exhausted; explicit reprovisioning required."));
+    LOG_ERROR("Persistence", "DevNonce exhausted; explicit reprovisioning required.");
     gLastActivationState = LW_ERR_NONCE_EXHAUSTED;
     return false;
   }
@@ -264,18 +261,15 @@ bool lwActivate() {
 
   gLastActivationState = state;
 
-  // RadioLib owns the Join Request TX and RX1/RX2 scheduling. These boundary
-  // timestamps bracket that blocking transaction for bench logs.
-  clockLogTimestamp(F("OTAA/ABP activation complete"));
 
   if(state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
-    Serial.println(F("[LoRaWAN] Session restored!"));
+    LOG_INFO("LoRaWAN", "Session restored!");
     return true;
   }
 
   if(state == RADIOLIB_LORAWAN_NEW_SESSION) {
     if(!lwSaveNonces()) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
-    Serial.println(F("[LoRaWAN] Successfully started new session!"));
+    LOG_INFO("LoRaWAN", "Successfully started new session!");
     return true;
   }
 
@@ -288,15 +282,14 @@ bool lwActivate() {
     if(restoreState != RADIOLIB_ERR_NONE) {
       gPersistenceHealthy = false;
       gLastActivationState = restoreState;
-      Serial.println(F("[Persistence] Cannot skip uncertain join nonce; joining disabled."));
+      LOG_ERROR("Persistence", "Cannot skip uncertain join nonce; joining disabled.");
       return false;
     }
-    Serial.println(F("[Persistence] Uncertain join attempt; skipped to reserved nonce bound."));
+    LOG_WARN("Persistence", "Uncertain join attempt; skipped to reserved nonce bound.");
   }
 #endif
 
-  Serial.print(F("[LoRaWAN] Join failed, code "));
-  Serial.println(state);
+  LOG_WARN("LoRaWAN", "Join failed: code=%d", int(state));
   return false;
 }
 
@@ -318,11 +311,9 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   LoRaWANEvent_t eventUp = {};
   LoRaWANEvent_t eventDown = {};
 
-  Serial.print(F("[LoRaWAN] Uplink preflight: maxPayload="));
-  Serial.print(lwMaxPayloadBytes());
-  Serial.print(F(", len=")); Serial.println(lenUp);
+  LOG_DEBUG("LoRaWAN", "Uplink preflight: max_payload=%u bytes=%u",
+    unsigned(lwMaxPayloadBytes()), unsigned(lenUp));
 
-  clockLogTimestamp(F("uplink transaction begin"));
 
   if(millis() < started || lwTimerRolloverPending()) { return LW_ERR_TIMER_ROLLOVER; }
 
@@ -337,15 +328,12 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
     &eventDown
   );
 
-  // sendReceive includes TX completion and both Class A receive windows;
-  // RadioLib remains solely responsible for their timing.
-  clockLogTimestamp(F("uplink transaction complete"));
+  // sendReceive owns TX completion and both Class A receive windows.
 
   if(state >= RADIOLIB_ERR_NONE) {
-    Serial.print(F("[LoRaWAN] TX frame=")); Serial.print(eventUp.fCnt);
-    Serial.print(F(", MHz=")); Serial.print(eventUp.freq);
-    Serial.print(F(", DR=")); Serial.print(eventUp.datarate);
-    Serial.print(F(", receive window=")); Serial.println(state);
+    LOG_DEBUG("LoRaWAN", "TX frame=%lu freq_kHz=%lu DR=%u receive_window=%d",
+      static_cast<unsigned long>(eventUp.fCnt), static_cast<unsigned long>(eventUp.freq * 1000.0f + 0.5f),
+      unsigned(eventUp.datarate), int(state));
   }
 
   if(state <= 0) { *lenDown = 0; }
@@ -369,12 +357,12 @@ static bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates) {
        gRegion.payloadLenMax[dr] < requiredBytes + RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN) { continue; }
     int16_t state = gNode.setDatarate(dr);
     if(state != RADIOLIB_ERR_NONE) {
-      Serial.print(F("[Payload] Data-rate candidate rejected, code ")); Serial.println(state);
+      LOG_DEBUG("Payload", "Data-rate candidate rejected: code=%d", int(state));
       continue;
     }
     size_t available = gNode.getMaxPayloadLen();
     if(available >= requiredBytes && available <= gRegion.payloadLenMax[dr]) {
-      Serial.print(F("[Payload] Retrying at permitted data rate ")); Serial.println(dr);
+      LOG_WARN("Payload", "Retrying at permitted data rate=%u", unsigned(dr));
       return true;
     }
   }

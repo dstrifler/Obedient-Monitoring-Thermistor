@@ -5,6 +5,7 @@
 #include <FlashIAPBlockDevice.h>
 #include <RadioLib.h>
 #include <string.h>
+#include "log_service.h"
 
 // Two erase pages, separate from the legacy EEPROM page at 0xFE000.
 // Check the linked image before touching flash; never erase firmware or settings.
@@ -109,19 +110,19 @@ static bool nonceStoreScan() {
       // Its erase/copy may be interrupted at any bit; retain the owner page.
       activePage = owner;
       gNonceReclaimIntent = intentOffset;
-      Serial.println(F("[Persistence] Recovering authorized stale-page reclamation."));
+      LOG_WARN("Persistence", "Recovering authorized stale-page reclamation.");
     } else if(nonceMatchesTransition(activation, NONCE_ACTIVATE_MAGIC, intent, intent.sequence + 2)) {
       NonceRecord snapshot;
       if(gNonceFlash.read(&snapshot, target * NONCE_PAGE_BYTES, sizeof(snapshot)) != 0 ||
          !nonceMatchesTransition(snapshot, NONCE_SNAPSHOT_MAGIC, intent, intent.sequence + 1)) {
-        Serial.println(F("[Persistence] Activated page snapshot damaged; no rollback permitted."));
+        LOG_ERROR("Persistence", "Activated page snapshot damaged; no rollback permitted.");
         return false;
       }
       activePage = target;
       gNonceSequence = activation.sequence;
       haveSequence = true;
     } else {
-      Serial.println(F("[Persistence] Ambiguous page activation; explicit recovery required."));
+      LOG_ERROR("Persistence", "Ambiguous page activation; explicit recovery required.");
       return false;
     }
   }
@@ -135,7 +136,7 @@ static bool nonceStoreScan() {
       bool dataRecord = record.magic == NONCE_MAGIC || (record.magic == NONCE_SNAPSHOT_MAGIC && slot == 0);
       bool currentIntent = static_cast<int32_t>(offset) == gNonceReclaimIntent;
       if(!nonceRecordBodyValid(record) || (!dataRecord && !currentIntent)) {
-        Serial.println(F("[Persistence] Ambiguous current journal record; refusing nonce rollback."));
+        LOG_ERROR("Persistence", "Ambiguous current journal record; refusing nonce rollback.");
         return false;
       }
       bool newer = !haveSequence || static_cast<int32_t>(record.sequence - gNonceSequence) > 0;
@@ -155,12 +156,12 @@ static bool nonceStoreBegin() {
   uintptr_t imageEnd = reinterpret_cast<uintptr_t>(&__etext) +
     (reinterpret_cast<uintptr_t>(&__data_end__) - reinterpret_cast<uintptr_t>(&__data_start__));
   if(imageEnd > NONCE_FLASH_BASE || gNonceFlash.init() != 0) {
-    Serial.println(F("[Persistence] Flash initialization/image overlap failure."));
+    LOG_ERROR("Persistence", "Flash initialization/image overlap failure.");
     return false;
   }
   if(gNonceFlash.get_program_size() != sizeof(uint32_t) ||
      gNonceFlash.get_erase_size() != NONCE_PAGE_BYTES) {
-    Serial.println(F("[Persistence] Unsupported flash geometry."));
+    LOG_ERROR("Persistence", "Unsupported flash geometry.");
     return false;
   }
   return nonceStoreScan();
@@ -226,7 +227,7 @@ static bool nonceStoreSave(const uint8_t* nonces) {
     NonceRecord spare[2];
     if(!gNonceStoreHasRecord || gNonceFlash.read(spare, intentOffset, sizeof(spare)) != 0 ||
        !nonceErased(spare[0]) || !nonceErased(spare[1])) {
-      Serial.println(F("[Persistence] No reclamation slots; legacy full page needs explicit migration."));
+      LOG_ERROR("Persistence", "No reclamation slots; legacy full page needs explicit migration.");
       return false;
     }
     uint32_t intentSequence = gNonceSequence + 1;

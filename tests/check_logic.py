@@ -2,6 +2,7 @@
 """Run actual firmware logic against host fakes; does not replace a board build."""
 from pathlib import Path
 import re
+import os
 import subprocess
 import tempfile
 
@@ -11,11 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def run(name, source, headers=None):
     with tempfile.TemporaryDirectory(prefix='thermistor-check-') as tmp:
         folder = Path(tmp)
-        for path, contents in (headers or {}).items():
+        for path, contents in dict({'log_service.h': ''}, **(headers or {})).items():
             (folder / path).write_text(contents)
         cpp = folder / (name + '.cpp')
         cpp.write_text(source)
-        subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
+        level_flags = (['-DFW_LOG_LEVEL=' + os.environ['LOGIC_LOG_LEVEL']]
+                       if 'LOGIC_LOG_LEVEL' in os.environ else [])
+        subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror', *level_flags,
                         '-Wno-unused-function', '-I', str(folder), str(cpp),
                         '-o', str(folder / name)], check=True)
         subprocess.run([str(folder / name)], check=True)
@@ -30,21 +33,29 @@ COMMON = r'''
 #include <algorithm>
 #include <vector>
 #include <iostream>
+#include <cstdio>
+#include <cstdarg>
+#include <string>
 using __FlashStringHelper = char;
 #define F(x) x
 #define HEX 16
 #define SERIAL_BAUD_RATE 115200
 struct SerialFake {
- void begin(int) {}
- template<class T> void print(T) {}
- template<class T> void print(T, int) {}
- template<class T> void println(T) {}
- void println() {}
+ bool ready=true,blocking=true;
+ unsigned begins=0;
+ std::string output;
+ void begin(unsigned long) { ++begins; }
+ void set_blocking(bool value) { blocking=value; }
+ bool writeable() { return ready; }
+ size_t write(uint8_t value) { assert(ready && !blocking);output.push_back(char(value));return 1; }
 } Serial;
 uint32_t ticks=0;
 uint32_t millis() { return ticks; }
+uint32_t micros() { return ticks*1000; }
 void delay(uint32_t ms) { ticks += ms; }
 '''
+for name in ['log_config.h', 'log_service.h', 'log_service.cpp']:
+    COMMON += re.sub(r'^#include .*\n', '', (ROOT / name).read_text(), flags=re.M)
 COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.h').read_text(), flags=re.M)
 
 # Exercise the journal implementation itself with flash that can lose power
@@ -321,7 +332,6 @@ public:
 };
 bool nonceStoreSave(const uint8_t* p) { if(!saveWorks) return false; memcpy(durable,p,18); return true; }
 struct { void standby() {} } gRadio;
-void clockLogTimestamp(const char*) {}
 '''
 run('nonce_reservation_and_downlink', COMMON + NODE_FAKE + node_class + r'''
 static PersistentLoRaWANNode gNode;
@@ -662,7 +672,6 @@ int16_t lwRestore() {
 }
 bool clockBegin() { return true; }
 bool eepromBootstrap() { return true; }
-void clockLogTimestamp(const char*) {}
 bool lwIsActivated() { return gNode.isActivated(); }
 bool lwPersistenceHealthy() { return gPersistenceHealthy; }
 int16_t lwLastActivationState() { return gLastActivationState; }
@@ -1222,5 +1231,29 @@ int main() {
  assert(nodeBegins==previousBegins+2 && restores==previousRestores+1);
  resetRadio();restoreResult=LW_ERR_PERSISTENCE;assert(!lwRecover() && !gPersistenceHealthy);
  unsigned before=constructions;assert(!lwRecover() && constructions==before);
+}
+''')
+
+run('serial_backpressure_and_fault_state', COMMON + FAKES + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ Serial.ready=false;setup();advance(185000);
+ assert(joins==1 && sends.size()==4 && Serial.output.empty());
+#if FW_LOG_LEVEL != FW_LOG_LEVEL_OFF
+ for(unsigned i=0;i<20;++i) { LOG_INFO("Pressure", "Pending %u", i); }
+ assert(logDroppedCount(LogLevel::INFO)>0);
+#endif
+ // Full/unwritable serial output must not delay faults or radio policy, and
+ // critical messages must survive INFO pressure until the UART becomes ready.
+ appFault("Injected failure");size_t before=sends.size();advance(31000);
+ assert(gSchedulerState==SCHED_FAULT && sends.size()==before && Serial.output.empty());
+ Serial.ready=true;advance(5000);
+#if FW_LOG_LEVEL != FW_LOG_LEVEL_OFF
+ assert(Serial.output.find("[ERROR][App] Injected failure\r\n")!=std::string::npos);
+ assert(Serial.output.find("[ERROR][Fault] Radio work paused;")!=std::string::npos);
+ assert(Serial.output.find("Dropped totals:")!=std::string::npos && sends.size()==before);
+#else
+ assert(Serial.output.empty() && sends.size()==before);
+#endif
 }
 ''')

@@ -173,10 +173,14 @@ void setup() {
 // RadioLib still owns activation and Class A receive-window timing.
 
 void loop() {
-  delay(1);  // Yield to the RTOS between scheduler checks.
   uint32_t now = millis();
-  if((int32_t)(now - gNextSchedulerTickMs) < 0) {
-    return;
+  int32_t waitMs = (int32_t)(gNextSchedulerTickMs - now);
+  if(waitMs > 0) {
+    delay((uint32_t)waitMs);  // Yield until the next application scheduler tick.
+    now = millis();
+    if((int32_t)(now - gNextSchedulerTickMs) < 0) {
+      return;
+    }
   }
   gNextSchedulerTickMs = now + LOOP_SLICE_MS;
 

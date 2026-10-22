@@ -34,6 +34,48 @@ def patch_source(source):
         if source.count(old) != count:
             raise ValueError('RadioLib patch context changed: ' + old)
         source = source.replace(old, new)
+    # Close abandoned Class A windows on both TX and RX error exits. Wait
+    # beyond the configured RX2 slot before allowing another transmission.
+    recovery = """static void radioLibRecoverReceiveWindows(PhysicalLayer* phy, Module* mod, RadioLibTime_t start,
+                                          RadioLibTime_t* end, RadioLibTime_t rx2Delay) {
+  RadioLibTime_t settle = rx2Delay + 2000;  // conservative receive-window guard
+  RadioLibTime_t elapsed = mod->hal->millis() - start;
+  if(elapsed < settle) { mod->hal->delay(settle - elapsed); }
+  (void)phy->standby();
+  *end = mod->hal->millis();
+}
+
+"""
+    anchor = 'LoRaWANNode::LoRaWANNode(PhysicalLayer* phy'
+    source = source.replace(anchor, recovery + anchor, 1)
+    tx_error = """    if(state != RADIOLIB_ERR_NONE) {
+      #if !RADIOLIB_STATIC_ONLY
+      delete[] uplinkMsg;"""
+    rx_error = """  // if a hardware error occurred, return
+  if(state < RADIOLIB_ERR_NONE) {
+    return(state);"""
+    for old, new in [
+        (tx_error, tx_error.replace('      #if', '      radioLibRecoverReceiveWindows(this->phyLayer, mod, this->rxDelayStart, &this->rxDelayEnd, this->rxDelays[2]);\n      #if', 1)),
+        (rx_error, rx_error.replace('    return(state);', '    radioLibRecoverReceiveWindows(this->phyLayer, mod, this->rxDelayStart, &this->rxDelayEnd, this->rxDelays[2]);\n    return(state);')),
+    ]:
+        if source.count(old) != 1:
+            raise ValueError('RadioLib error cleanup context changed')
+        source = source.replace(old, new, 1)
+    # Consume the DevNonce after composing the request, before RF may start.
+    # A timeout does not prove the packet failed to leave the antenna.
+    increment = """  // JoinRequest successfully sent, so increase & save devNonce
+  this->devNonce += 1;
+  LoRaWANNode::hton<uint16_t>(&this->bufferNonces[RADIOLIB_LORAWAN_NONCES_DEV_NONCE], this->devNonce);
+"""
+    if source.count(increment) != 1:
+        raise ValueError('RadioLib nonce increment context changed')
+    source = source.replace(increment, '', 1)
+    compose = '  this->composeJoinRequest(joinRequestMsg);'
+    if source.count(compose) != 1:
+        raise ValueError('RadioLib join composition context changed')
+    source = source.replace(compose, compose + '\n\n' + increment.replace(
+        '// JoinRequest successfully sent, so increase & save devNonce',
+        '// Consume the composed DevNonce before any potentially transmitting operation'), 1)
     start = source.index('RadioLibTime_t LoRaWANNode::timeUntilUplink()')
     end = source.index('uint8_t LoRaWANNode::getMaxPayloadLen()', start)
     source = source[:start] + '''RadioLibTime_t LoRaWANNode::timeUntilUplink() {
@@ -58,7 +100,7 @@ def prepare(upstream, output):
     shutil.copytree(upstream, output, dirs_exist_ok=True)
     (output / relative).write_text(patched)
     header = output / 'src/RadioLib.h'
-    header.write_text('#define RADIOLIB_THERMISTOR_PROTOCOL_FIXES 1\n' + header.read_text())
+    header.write_text('#define RADIOLIB_THERMISTOR_PROTOCOL_FIXES 2\n' + header.read_text())
     print('Prepared isolated RadioLib 7.1.2 with payload and rollover fixes')
 
 

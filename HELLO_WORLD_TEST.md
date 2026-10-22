@@ -110,6 +110,13 @@ instead of becoming a multi-day application sleep. Both the initial eligibility
 check and the result after `UPLINK_UNAVAILABLE` use this validation.
 Other transient send failures back off from five seconds to a five-minute cap.
 Successful activation resets that backoff to five seconds.
+Three consecutive uplink hardware errors use the same cooldown/recovery path
+as join hardware errors. Different hardware error codes count toward the same
+streak. A successful transaction or a non-hardware send error clears the uplink
+streak; waiting for airtime eligibility does not count as an attempt. A fresh
+join or scheduled recovery also clears the streak. This includes SPI errors
+before transmission, which otherwise leave normal RX timestamps and would
+never trigger the unavailable-transaction workaround.
 A receive-side error may occur after actual transmission, so such retries can
 produce additional application messages. Lost activation returns to joining.
 No-join-accept retries remain one minute apart. Three consecutive join hardware
@@ -130,6 +137,25 @@ three attempts, a minute apart. Persistence failure stops recovery immediately;
 radio initialization failure after the third attempt enters the paused state.
 Flash history is retained throughout. Repeated hardware faults can still prevent
 rejoining; recovery is not proof of RF connectivity.
+
+Radio work pauses during the final ten minutes before the approximately
+49.7-day `millis()` rollover. This guard leaves time for the current US915
+Class A transaction, including up to 15 NbTrans repetitions, RX2 delays up to
+16 seconds, and PHY/CPU margin. The join and send wrappers recheck the guard
+immediately before their blocking library calls; activation checks again after
+nonce reservation writes. A deferral never authorizes RF or consumes an in-RAM
+DevNonce. A reservation completed before deferral remains durable and is skipped
+normally during restore.
+
+After the wrap, the scheduler uses the existing 60-second cooldown and recreates
+the node, restores nonce history, and joins a fresh OTAA session before sending.
+It also detects a wrap missed while the scheduler was suspended, before using
+old library timestamps. Permanent fault states remain paused. This intentionally
+interrupts the one-minute report cadence around rollover. The guard budget must
+be reviewed if the region, modem, or library blocking behavior changes. It is a
+budget for normal bounded Class A transactions, not a watchdog for a stuck
+driver, prolonged RTOS starvation, or an unbounded chain of automatic MAC-only
+responses inside the library.
 
 After three consecutive payload-size or dwell-time rejections, the firmware
 tries a data-rate candidate through public `setDatarate()`. Candidates must have
@@ -176,9 +202,9 @@ where implemented:
   by temporarily changing the node's pending-command state. Repeated rejection
   now triggers the bounded public data-rate selection described above.
 - Internal absolute timer comparisons are not consistently rollover safe.
-  The application's own scheduler uses rollover-safe arithmetic, but that does
-  not establish correct library behavior across the roughly 49.7-day wrap.
-  Out-of-range reported waits are handled by firmware recovery.
+  Firmware pauses new transactions before rollover and obtains a fresh session
+  afterward, as described above. It also handles out-of-range reported waits
+  through recovery. Library comparisons remain unchanged.
 - TX or early RX errors can leave the library's transaction unavailable. The
   firmware detects repeated zero-wait unavailable results and recovers by
   recreating its node and rejoining, as described above.
@@ -213,6 +239,13 @@ capacity recovery. Capacity integration tests execute the unchanged upstream
 payload, validation and public data-rate setter methods, including restoration
 of transmission and exhaustion of permitted candidates. A dependency check accepts the stock
 library and rejects edits to the formerly patched files without modifying them.
+Additional regressions cover uplink SPI failures before RF, mixed hardware
+errors, streak reset rules, cooldown and nonce retention during recovery, join
+and send calls within 50 ms of timer rollover, the exact guard boundary, flash
+writes entering the guard, missed rollover, and recovery before subsequent RF.
+The margin check runs 15 repetitions of the stock transmit method with simulated
+one-second uplink airtime, 100-ms PHY setup and 16-second RX2 delay. It checks the
+chosen budget for this scenario; it is not a physical worst-case timing proof.
 Reclamation tests cover bit-level stale-page erase damage with commit words
 intact, repeated interruption/reboot/retry, and every program byte of the
 intent/snapshot/activation/new-reservation sequence.

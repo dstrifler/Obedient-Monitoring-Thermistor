@@ -15,6 +15,7 @@
 #include "clock_service.h"
 #include "eeprom_service.h"
 #include "nonce_store.h"
+#include "lorawan_timer.h"
 
 static SX1262 gRadio = new Module(
   LORA_PIN_CS,
@@ -224,6 +225,9 @@ static bool lwRecover() {
 
 bool lwActivate() {
   int16_t state = RADIOLIB_ERR_NETWORK_NOT_JOINED;
+  const uint32_t started = millis();
+
+  if(lwTimerRolloverPending()) { gLastActivationState = LW_ERR_TIMER_ROLLOVER; return false; }
 
   Serial.println(F("[LoRaWAN] Attempting network join ..."));
   gRadio.standby();
@@ -242,6 +246,11 @@ bool lwActivate() {
     uint32_t limit = static_cast<uint32_t>(next) + 16;
     gReservedNonceLimit = limit > UINT16_MAX ? UINT16_MAX : limit;
     if(!lwSaveNonces()) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
+  }
+  // Flash reservation/logging may have crossed into the guard interval.
+  if(millis() < started || lwTimerRolloverPending()) {
+    gLastActivationState = LW_ERR_TIMER_ROLLOVER;
+    return false;
   }
   gNode.scheduleTransmission(millis());
   state = gNode.activateOTAA();
@@ -301,6 +310,7 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   }
 
   *lenDown = 0;
+  const uint32_t started = millis();
   LoRaWANEvent_t eventUp = {};
   LoRaWANEvent_t eventDown = {};
 
@@ -309,6 +319,8 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   Serial.print(F(", len=")); Serial.println(lenUp);
 
   clockLogTimestamp(F("uplink transaction begin"));
+
+  if(millis() < started || lwTimerRolloverPending()) { return LW_ERR_TIMER_ROLLOVER; }
 
   int16_t state = gNode.sendReceive(
     dataUp,

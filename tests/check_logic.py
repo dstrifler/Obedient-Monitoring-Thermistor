@@ -45,6 +45,7 @@ uint32_t ticks=0;
 uint32_t millis() { return ticks; }
 void delay(uint32_t ms) { ticks += ms; }
 '''
+COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.h').read_text(), flags=re.M)
 
 # Exercise the journal implementation itself with flash that can lose power
 # during body programming, commit programming, or page erasure.
@@ -181,7 +182,7 @@ void advance(uint32_t ms) { uint32_t start=ticks; while(uint32_t(ticks-start)<ms
 void reset() {
  ticks=0; activated=false; joinWorks=true; persistence=true; sendResult=0; limit=11;
  eligibleAt=0;forcedWait=0;waitAfterSend=0;eligibilityQueries=0;capacityChanges=0;capacityWorks=true;capacityImproves=true;joins=0;activationResult=-42;sends.clear();lengths.clear();
- gJoinHardwareFailures=0;gCapacityFailures=0;gCapacityRatesTried=0;gRetryBackoffMs=5000; gUnavailableAttempts=0; gRecoveryAttempts=0; recoveries=0; recoveryWorks=true; gReportWaitMs=60000; setup();
+ gJoinHardwareFailures=0;gUplinkHardwareFailures=0;gCapacityFailures=0;gCapacityRatesTried=0;gRetryBackoffMs=5000; gUnavailableAttempts=0; gRecoveryAttempts=0; recoveries=0; recoveryWorks=true; gReportWaitMs=60000; setup();
 }
 int main() {
  // Waiting for a tick sleeps through the idle interval, including rollover.
@@ -205,7 +206,8 @@ int main() {
  reset(); joinWorks=false; persistence=false; advance(500); assert(gSchedulerState==SCHED_FAULT && sends.empty());
  reset(); sendResult=RADIOLIB_ERR_NETWORK_NOT_JOINED; advance(200); sendResult=0; advance(1000); assert(joins==2);
  reset(); ticks=UINT32_MAX-32000; eligibleAt=ticks; gNextSchedulerTickMs=ticks; gLastJoinAttemptMs=ticks-60000;
- advance(500); advance(61000); assert(sends.size()==2 && uint32_t(sends[1]-sends[0])>=60000);
+ advance(500);assert(sends.empty() && gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER);
+ advance(93000);assert(sends.size()==1 && recoveries==1);
  // Persistent MAC responses continue at one-minute intervals until room returns.
  reset(); limit=10; advance(480000);
  assert(sends.size()==8 && gSchedulerState!=SCHED_FAULT);
@@ -234,9 +236,9 @@ int main() {
  assert(recoveries==3 && gSchedulerState==SCHED_FAULT);
  reset();recoveryWorks=false;persistence=false;scheduleRadioRecovery();advance(61000);
  assert(recoveries==1 && gSchedulerState==SCHED_FAULT);
- // The cooldown is elapsed-time based across uint32 rollover.
+ // Rollover adds a fresh cooldown after the boundary, then recovers once.
  reset();ticks=UINT32_MAX-30000;gNextSchedulerTickMs=ticks;scheduleRadioRecovery();
- advance(59000);assert(recoveries==0);advance(2000);assert(recoveries==1);
+ advance(89000);assert(recoveries==0);advance(2000);assert(recoveries==1);
 
 }
 ''')
@@ -742,8 +744,8 @@ int main() {
  sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;waitAfterSend=0x80000000UL;
  forcedWait=0;activated=true;gSchedulerState=SCHED_SEND_UPLINK;loop();
  assert(gSchedulerState==SCHED_RECOVER_RADIO);
- // Re-query scheduling uses elapsed durations across wrap.
- forcedWait=0;waitAfterSend=0;sendResult=0;ticks=UINT32_MAX-100000;
+ // Re-query scheduling also works at high uptime outside the rollover guard.
+ forcedWait=0;waitAfterSend=0;sendResult=0;ticks=UINT32_MAX-1000000;
  gNextSchedulerTickMs=ticks;eligibleAt=ticks+180000;gSchedulerState=SCHED_SEND_UPLINK;
  size_t before=sends.size();advance(179000);assert(sends.size()==before);
  advance(2000);assert(sends.size()==before+1);
@@ -900,5 +902,185 @@ int main() {
  uint8_t tooLong=12+15;
  assert(gNode.isValidUplink(&tooLong,1)==RADIOLIB_ERR_PACKET_TOO_LONG);
  assert(gNode.fOptsUpLen==15); // The firmware never alters the pending queue.
+}
+''')
+
+# Exercise firmware hardware-error policy separately from the availability
+# workaround: failures before PHY transmit never poison the RX timestamps.
+run('uplink_hardware_failure_policy', COMMON + FAKES + sketch + r'''
+void attempt(int16_t state) {
+ sendResult=state;gSchedulerState=SCHED_SEND_UPLINK;gNextSchedulerTickMs=ticks;loop();
+}
+int main() {
+ setup();activated=true;
+ attempt(RADIOLIB_ERR_SPI_CMD_TIMEOUT);assert(gUplinkHardwareFailures==1);
+ attempt(RADIOLIB_ERR_SPI_CMD_FAILED);assert(gUplinkHardwareFailures==2);
+ attempt(RADIOLIB_ERR_RX_TIMEOUT);
+ assert(gSchedulerState==SCHED_RECOVER_RADIO && recoveries==0);
+ // Non-hardware failures and successful transactions interrupt the streak.
+ activated=true;gSchedulerState=SCHED_WAIT_FOR_REPORT;
+ attempt(RADIOLIB_ERR_TX_TIMEOUT);assert(gUplinkHardwareFailures==1);
+ attempt(RADIOLIB_ERR_UNKNOWN);assert(gUplinkHardwareFailures==0 && gSchedulerState==SCHED_WAIT_FOR_REPORT);
+ attempt(RADIOLIB_ERR_SPI_WRITE_FAILED);attempt(0);assert(gUplinkHardwareFailures==0);
+ // Waiting for eligibility is not a failed transaction.
+ attempt(RADIOLIB_ERR_CHIP_NOT_FOUND);forcedWait=60000;
+ attempt(RADIOLIB_ERR_SPI_CMD_INVALID);assert(gUplinkHardwareFailures==1);
+ forcedWait=0;assert(ensureJoined()); // Already joined; does not erase the streak.
+ assert(gUplinkHardwareFailures==1);
+ activated=false;assert(ensureJoined() && gUplinkHardwareFailures==0);
+}
+''')
+
+hardware_fixture = STOCK_FAKE.replace(
+    'int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) { return 0; }', r'''
+ int16_t forcedPhyError=0;unsigned configFailures=0;
+ int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) {
+  if(forcedPhyError) { ++configFailures; }
+  return forcedPhyError;
+ }
+''')
+hardware_integration = (COMMON + error_constants + schema + hardware_fixture + templates +
+                        stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
+run('stock_uplink_spi_error_recovery', hardware_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ assert(lwIsActivated() && gRadio.uplinkCalls==1);
+ uint32_t acceptedJoinNonce=gNode.joinNonce;uint16_t reserved=durableLimit();
+ gNode.forcedPhyError=RADIOLIB_ERR_SPI_CMD_TIMEOUT;
+ uint32_t started=ticks;
+ while(gSchedulerState!=SCHED_RECOVER_RADIO && uint32_t(ticks-started)<120000) { loop(); }
+ assert(gNode.configFailures==3 && initializations==1 && gRadio.uplinkCalls==1);
+ assert(gSchedulerState==SCHED_RECOVER_RADIO);
+ uint32_t recoveryStart=gRecoveryStartedMs;
+ advance(58000);assert(initializations==1);
+ // Node reconstruction clears the simulated fault. Restore skips the durable
+ // nonce reservation, then obtain fresh keys/counters through OTAA before RF.
+ advance(10000);
+ assert(uint32_t(ticks-recoveryStart)>=60000 && initializations==2);
+ assert(lwIsActivated() && gRadio.uplinkCalls==2 && gUplinkHardwareFailures==0);
+ assert(gRadio.attempted.back()==reserved && gNode.joinNonce==acceptedJoinNonce+1);
+ advance(61000);assert(gRadio.uplinkCalls==3);
+}
+''')
+
+# Track all HAL delays and add realistic setup latency. Calls that started
+# within 50 ms of the boundary used to request ~2^32 ms of internal sleep.
+rollover_fixture = STOCK_FAKE.replace('struct Hal {', 'uint32_t maxHalDelay=0;\nstruct Hal {')
+rollover_fixture = rollover_fixture.replace(
+    'void delay(uint32_t ms) { ticks+=ms; }',
+    'void delay(uint32_t ms) { assert(ms<60000);maxHalDelay=std::max(maxHalDelay,ms);ticks+=ms; }')
+rollover_fixture = rollover_fixture.replace(
+    'void createSession(uint8_t,uint8_t) { isActive=false; }', r'''
+ uint32_t setupDelay=100,phyDelay=100;
+ void createSession(uint8_t,uint8_t) { ticks+=setupDelay;isActive=false; }
+''')
+rollover_fixture = rollover_fixture.replace(
+    'int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) { return 0; }',
+    'int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) { ticks+=phyDelay;return 0; }')
+rollover_integration = (COMMON + error_constants + schema + rollover_fixture + templates +
+                        stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
+run('stock_blocking_transaction_rollover_guard', rollover_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();
+ const uint32_t boundary=UINT32_MAX-LW_TRANSACTION_GUARD_MS;
+ ticks=boundary-1;assert(!lwTimerRolloverPending());
+ ticks=boundary;assert(lwTimerRolloverPending());
+ // Direct wrapper calls are guarded too, without consuming a nonce or doing RF.
+ ticks=UINT32_MAX-50;
+ assert(!lwActivate() && lwLastActivationState()==LW_ERR_TIMER_ROLLOVER);
+ assert(gRadio.attempted.empty() && !haveDurable && maxHalDelay==0);
+ uint8_t data[255]={};size_t down=255;
+ assert(lwSendReceive(data,11,data,&down)==LW_ERR_TIMER_ROLLOVER && down==0);
+ assert(gRadio.uplinkCalls==0 && maxHalDelay==0);
+ // The join scheduler waits across wrap; a fresh node is initialized only
+ // after the normal cooldown, then joins with the original durable history.
+ gLastJoinAttemptMs=ticks-60000;gNextSchedulerTickMs=ticks;
+ loop();assert(gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER);
+ advance(59000);assert(initializations==1 && gRadio.attempted.empty());
+ advance(10000);assert(initializations==2 && lwIsActivated() && gRadio.uplinkCalls==1);
+ assert(gRadio.attempted.back()==0);
+ uint16_t reserved=durableLimit();uint32_t acceptedJoinNonce=gNode.joinNonce;
+ // Do the same with a live session. No pre-wrap application or maintenance RF.
+ ticks=boundary;gNextSchedulerTickMs=ticks;gSchedulerState=SCHED_SEND_UPLINK;
+ loop();assert(gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER && gRadio.uplinkCalls==1);
+ advance(LW_TRANSACTION_GUARD_MS-1000);
+ assert(initializations==2 && gRadio.uplinkCalls==1);
+ advance(59000);assert(initializations==2); // Still within the post-wrap cooldown.
+ advance(10000);
+ assert(initializations==3 && lwIsActivated() && gRadio.uplinkCalls==2);
+ assert(gRadio.attempted.back()==reserved && gNode.joinNonce==acceptedJoinNonce+1);
+ assert(maxHalDelay<60000);
+ // Detect a wrap missed while the scheduler was suspended, before consulting
+ // stale library timestamps, and recover rather than waiting a whole cycle.
+ gLastSchedulerTimeMs=UINT32_MAX-1000000;ticks=100;
+ gNextSchedulerTickMs=ticks;gSchedulerState=SCHED_SEND_UPLINK;
+ loop();assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.uplinkCalls==2);
+ advance(59000);assert(initializations==3);
+ advance(10000);assert(initializations==4 && gRadio.uplinkCalls==3);
+ // A wrapper return observed just after wrap must not wait another 49 days.
+ ticks=100;gNextSchedulerTickMs=ticks;scheduleTimerRolloverWait();
+ assert(gSchedulerState==SCHED_RECOVER_RADIO);
+ // Timer maintenance never revives a permanent application fault.
+ appFault(F("test"));ticks=boundary;gNextSchedulerTickMs=ticks;
+ loop();assert(gSchedulerState==SCHED_FAULT);
+}
+''')
+
+# Delayed flash I/O can enter the guard after the initial activation preflight.
+late_guard_state = 'uint32_t flashDelay=100;\n' + STOCK_STATE.replace(
+    'memcpy(durable,p,sizeof(durable));haveDurable=true;return true;',
+    'ticks+=flashDelay;memcpy(durable,p,sizeof(durable));haveDurable=true;return true;')
+late_guard_integration = (COMMON + error_constants + schema + rollover_fixture + templates +
+                         stock_methods + node_class + late_guard_state + save + recover + activate + wrapper)
+run('stock_rollover_guard_after_nonce_reservation', late_guard_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();ticks=UINT32_MAX-LW_TRANSACTION_GUARD_MS-50;
+ assert(!lwActivate() && lwLastActivationState()==LW_ERR_TIMER_ROLLOVER);
+ assert(gRadio.attempted.empty() && durableLimit()==16 && gNode.nextDevNonce()==0);
+ // A durable reservation with no RF remains safe: recovery skips the batch.
+ assert(!ensureJoined() && gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER);
+ gNextSchedulerTickMs=ticks;advance(LW_TRANSACTION_GUARD_MS+70000);
+ assert(initializations==2 && lwIsActivated() && gRadio.attempted.back()==16);
+ assert(gRadio.uplinkCalls==1 && maxHalDelay<60000);
+ // Even a flash stall spanning the entire guard and wrap cannot authorize RF
+ // with pre-wrap library state when the activation wrapper resumes.
+ assert(lwRecover());size_t attempts=gRadio.attempted.size();
+ ticks=UINT32_MAX-LW_TRANSACTION_GUARD_MS-50;flashDelay=LW_TRANSACTION_GUARD_MS+100;
+ assert(!lwActivate() && lwLastActivationState()==LW_ERR_TIMER_ROLLOVER);
+ assert(gRadio.attempted.size()==attempts && ticks<1000);
+ scheduleTimerRolloverWait();assert(gSchedulerState==SCHED_RECOVER_RADIO);
+}
+''')
+
+# Exercise the guard margin with 15 repetitions of the unchanged transmit
+# method, maximum RX2 delay, simulated RF airtime and PHY setup latency.
+budget_fixture = rollover_fixture.replace(
+    '++uplinkCalls;return uplinkResult;', '++uplinkCalls;ticks+=1000;return uplinkResult;')
+budget_fixture = budget_fixture.replace(r'''
+  int16_t result=transmitUplink(&channel,const_cast<uint8_t*>(data),uint8_t(len),false);
+  if(result==0) { ticks+=2000;rxDelayEnd=ticks; }
+  return result;
+''', r'''
+  for(unsigned repetition=0;repetition<15;++repetition) {
+   int16_t result=transmitUplink(&channel,const_cast<uint8_t*>(data),uint8_t(len),repetition>0);
+   if(result!=0) { return result; }
+   ticks+=16000;rxDelayEnd=ticks;
+  }
+  return 0;
+''')
+assert 'repetition<15' in budget_fixture
+budget_integration = (COMMON + error_constants + schema + budget_fixture + templates +
+                      stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
+run('stock_rollover_guard_transaction_margin', budget_integration + sketch + r'''
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();assert(lwActivate());
+ const uint32_t boundary=UINT32_MAX-LW_TRANSACTION_GUARD_MS;
+ ticks=boundary-1;gNextSchedulerTickMs=ticks;gSchedulerState=SCHED_SEND_UPLINK;
+ loop();assert(gRadio.uplinkCalls==15 && ticks>boundary && ticks<UINT32_MAX);
+ assert(maxHalDelay<60000 && uint32_t(ticks-(boundary-1))==256500);
+ loop();assert(gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER && gRadio.uplinkCalls==15);
 }
 ''')

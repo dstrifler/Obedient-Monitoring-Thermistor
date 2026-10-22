@@ -1084,3 +1084,143 @@ int main() {
  loop();assert(gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER && gRadio.uplinkCalls==15);
 }
 ''')
+
+# Exercise real firmware startup/recovery and unchanged upstream radio init.
+# The earlier scheduler fixtures stub lwBegin(), so they cannot check the
+# NM180100 oscillator profile or RadioLib's default TCXO argument.
+sx_source = (upstream / 'src/modules/SX126x/SX126x.cpp').read_text()
+sx2_source = (upstream / 'src/modules/SX126x/SX1262.cpp').read_text()
+sx2_header = (upstream / 'src/modules/SX126x/SX1262.h').read_text()
+
+
+def sx_method(source, signature):
+    start = source.index(signature)
+    return source[start:source.index('\n}\n', start) + 3]
+
+
+sx_begin_declaration = re.search(r'    int16_t begin\(float freq = .*?;', sx2_header).group().strip()
+assert 'tcxoVoltage = 1.6' in sx_begin_declaration
+assert 'this->XTAL = false;' in sx_source
+sx_constants = {
+    'RADIOLIB_MODULE_SPI_WIDTH_ADDR', 'RADIOLIB_MODULE_SPI_WIDTH_CMD',
+    'RADIOLIB_MODULE_SPI_COMMAND_READ', 'RADIOLIB_MODULE_SPI_COMMAND_WRITE',
+    'RADIOLIB_MODULE_SPI_COMMAND_NOP', 'RADIOLIB_MODULE_SPI_COMMAND_STATUS',
+    'RADIOLIB_SX126X_CMD_READ_REGISTER', 'RADIOLIB_SX126X_CMD_WRITE_REGISTER',
+    'RADIOLIB_SX126X_CMD_NOP', 'RADIOLIB_SX126X_CMD_GET_STATUS',
+    'RADIOLIB_SX126X_LORA_BW_500_0', 'RADIOLIB_SX126X_LORA_CR_4_7',
+    'RADIOLIB_SX126X_LORA_CRC_ON', 'RADIOLIB_SX126X_LORA_HEADER_EXPLICIT',
+    'RADIOLIB_SX126X_PACKET_TYPE_LORA', 'RADIOLIB_SX126X_SYNC_WORD_PRIVATE',
+    'RADIOLIB_ERR_UNSUPPORTED',
+}
+sx_headers = '\n'.join((upstream / name).read_text() for name in (
+    'src/Module.h', 'src/modules/SX126x/SX126x.h', 'src/TypeDef.h'))
+sx_defines = '\n'.join(line for line in sx_headers.splitlines()
+                       if line.startswith('#define ') and line.split()[1] in sx_constants) + '\n'
+assert len(sx_defines.splitlines()) == len(sx_constants)
+sx_methods = (sx_method(sx_source, 'int16_t SX126x::modSetup(') +
+              sx_method(sx_source, 'int16_t SX126x::begin(') +
+              sx_method(sx2_source, 'int16_t SX1262::begin('))
+radio_begin = lw[lw.index('bool lwBegin()'):lw.index('bool lwIsActivated()')]
+sx_fixture = r'''
+#define LORA_USE_OTAA 1
+#define LORA_VERSION 0
+#define LORA_USE_SPI 1
+#define LORA_UPLINK_FPORT 1
+#define LORA_SUB_BAND 2
+#define RADIOLIB_ASSERT(s) do { if((s)!=0)return(s); } while(0)
+#define RADIOLIB_DEBUG_BASIC_PRINTLN(...) ((void)0)
+unsigned tcxoCalls=0,rfSwitchCalls=0,failRfSwitchAt=0,nodeBegins=0,restores=0;
+unsigned constructions=0;
+float selectedTcxo=0;
+bool chipFound=true,gPersistenceHealthy=true;
+int16_t configResult=0,nodeBeginResult=0,restoreResult=0;
+struct Hal { static const int GpioModeInput=0;void pinMode(int,int) {} };
+struct Module {
+ static const int BITS_16=16,BITS_8=8;
+ struct Configuration {
+  int widths[2]={},statusPos=0,cmds[4]={};bool stream=false;
+  int16_t (*parseStatusCb)(uint8_t)=nullptr;
+ } spiConfig;
+ Hal* hal;
+ void init() {}void term() {}
+ int getIrq() { return 40; }int getGpio() { return 39; }
+};
+class SX126x {
+public:
+ bool XTAL=false;
+ Module* mod;
+ const char* chipType="SX1262";
+ float bandwidthKhz=0;
+ uint8_t spreadingFactor=0,bandwidth=0,codingRate=0,ldrOptimize=0,crcTypeLoRa=0,headerType=0,implicitLen=0;
+ uint16_t preambleLengthLoRa=0;
+ uint32_t tcxoDelay=0;
+ SX126x(Module* m):mod(m) {}
+ bool findChip(const char*) { return chipFound; }
+ int16_t reset() { return 0; }int16_t standby() { return 0; }
+ int16_t setTCXO(float voltage) { ++tcxoCalls;selectedTcxo=voltage;return 0; }
+ int16_t config(uint8_t) { return configResult; }
+ int16_t setRegulatorLDO() { return 0; }int16_t setRegulatorDCDC() { return 0; }
+ int16_t setCodingRate(uint8_t) { return 0; }int16_t setSyncWord(uint8_t) { return 0; }
+ int16_t setPreambleLength(uint16_t) { return 0; }int16_t setCurrentLimit(float) { return 0; }
+ int16_t setDio2AsRfSwitch(bool=true) {
+  return ++rfSwitchCalls==failRfSwitchAt?RADIOLIB_ERR_SPI_CMD_FAILED:0;
+ }
+ int16_t setCRC(uint8_t) { return 0; }int16_t invertIQ(bool) { return 0; }
+ int16_t fixPaClamping() { return 0; }
+ static int16_t SPIparseStatus(uint8_t) { return 0; }
+ int16_t modSetup(float,bool,uint8_t);
+ int16_t begin(uint8_t,uint8_t,uint16_t,float,bool);
+};
+class SX1262:public SX126x {
+public:
+ using SX126x::SX126x;
+ int16_t setSpreadingFactor(uint8_t) { return 0; }int16_t setBandwidth(float) { return 0; }
+ int16_t setFrequency(float) { return 0; }int16_t setOutputPower(int8_t) { return 0; }
+ BEGIN_DECLARATION
+};
+Hal hal;Module mod;SX1262 gRadio(&mod);
+struct Region {} gRegion;
+class PersistentLoRaWANNode {
+public:
+ PersistentLoRaWANNode(SX1262*,Region*,uint8_t) { ++constructions; }
+ int16_t beginOTAA(uint64_t,uint64_t,const uint8_t*,const uint8_t*) {
+  ++nodeBegins;return nodeBeginResult;
+ }
+} gNode(&gRadio,&gRegion,LORA_SUB_BAND);
+uint64_t gJoinEUI=0,gDevEUI=0;
+uint8_t gAppKey[16]={};
+int16_t lwRestore() {
+ ++restores;if(restoreResult!=0)gPersistenceHealthy=false;return restoreResult;
+}
+'''.replace('BEGIN_DECLARATION', sx_begin_declaration)
+run('stock_radio_xtal_startup_and_recovery', COMMON + error_constants + sx_defines +
+    sx_fixture + sx_methods + radio_begin + recover + r'''
+void resetRadio() {
+ gRadio.XTAL=false;tcxoCalls=0;selectedTcxo=0;rfSwitchCalls=0;failRfSwitchAt=0;
+ chipFound=true;configResult=0;nodeBeginResult=0;restoreResult=0;gPersistenceHealthy=true;
+}
+int main() {
+ mod.hal=&hal;
+ // Positive control: the stock default really would request a 1.6-V TCXO.
+ assert(gRadio.begin()==0 && tcxoCalls==1 && selectedTcxo==1.6f);
+ resetRadio();assert(lwBegin());
+ assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==1 && rfSwitchCalls==2);
+ // Recovery must reapply the profile even if the flag was cleared beforehand.
+ resetRadio();assert(lwRecover());
+ assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==2 && restores==1 && constructions==2);
+ unsigned previousBegins=nodeBegins,previousRestores=restores;
+ resetRadio();chipFound=false;assert(!lwRecover());
+ assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==previousBegins && restores==previousRestores);
+ resetRadio();configResult=RADIOLIB_ERR_SPI_CMD_FAILED;assert(!lwRecover());
+ assert(tcxoCalls==0 && nodeBegins==previousBegins && restores==previousRestores);
+ // Fail the explicit RF-switch setup after the driver's own successful setup.
+ resetRadio();failRfSwitchAt=2;assert(!lwRecover());
+ assert(rfSwitchCalls==2 && nodeBegins==previousBegins && restores==previousRestores);
+ resetRadio();nodeBeginResult=RADIOLIB_ERR_INVALID_MODE;assert(!lwRecover());
+ assert(nodeBegins==previousBegins+1 && restores==previousRestores);
+ resetRadio();assert(lwRecover() && tcxoCalls==0);
+ assert(nodeBegins==previousBegins+2 && restores==previousRestores+1);
+ resetRadio();restoreResult=LW_ERR_PERSISTENCE;assert(!lwRecover() && !gPersistenceHealthy);
+ unsigned before=constructions;assert(!lwRecover() && constructions==before);
+}
+''')

@@ -5,6 +5,11 @@ settings. Sensor service files remain for later development. Application command
 are logged but ignored, keeping the text and successful-report cadence fixed.
 
 - Board: SparkFun LoRa Thing Plus expLoRaBLE (Apollo3).
+- Radio oscillator: the NM180100's SX1262 uses a 32 MHz crystal (module
+  datasheet section 7.3, page 12). The shared `lwBegin()` path sets RadioLib's
+  documented public `XTAL` flag before every radio initialization, including
+  recovery. This suppresses the default 1.6 V TCXO control on DIO3. This radio
+  oscillator configuration is separate from Apollo3 system-clock calibration.
 - FPort: `LORA_UPLINK_FPORT` (currently 1).
 - Payload: exactly 11 ASCII bytes, `Hello World`, without a trailing NUL.
 - Expected hex: `48656c6c6f20576f726c64`.
@@ -250,6 +255,12 @@ Reclamation tests cover bit-level stale-page erase damage with commit words
 intact, repeated interruption/reboot/retry, and every program byte of the
 intent/snapshot/activation/new-reservation sequence.
 These host fakes do not validate physical flash behavior, crystal accuracy or RF.
+The radio startup regression also executes the actual firmware `lwBegin()` and
+`lwRecover()` paths with unchanged upstream SX1262/SX126x initialization methods
+and their real default arguments. It checks XTAL selection on startup and
+recovery, verifies that no TCXO command is requested, and covers radio/RF-switch,
+node-initialization and nonce-restore failure propagation. Low-level hardware
+operations and the node/flash backend are faked.
 
 ## Bench check
 

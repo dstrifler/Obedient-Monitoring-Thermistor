@@ -106,6 +106,10 @@ bool lwBegin() {
   }
 
   Serial.print(F("[LoRaWAN] Initialise the radio ... "));
+  // NM180100 uses a 32 MHz crystal (datasheet section 7.3). Select RadioLib's
+  // documented XTAL mode before every init, including recovery, to suppress
+  // the default 1.6 V TCXO control on DIO3.
+  gRadio.XTAL = true;
   int16_t radioState = gRadio.begin();
   if(radioState != RADIOLIB_ERR_NONE) {
     Serial.print(F("failed, code "));

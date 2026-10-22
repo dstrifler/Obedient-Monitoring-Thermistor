@@ -23,8 +23,61 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   three-attempt fault. Payload eligibility comes from stock RadioLib; see its
   remaining limitations below.
 - Uplinks are unconfirmed. Local transaction success does not establish Helium
-  receipt. Inspect the network console. Logs include frame counter, frequency,
-  data rate and receive-window result; no downlink correctly reports zero bytes.
+  receipt. Inspect the network console. INFO reports transaction completion;
+  DEBUG adds frame counter, frequency, data rate and receive-window result.
+  An absent application downlink correctly reports zero bytes to the application.
+
+## Serial output
+
+All firmware-owned output uses `log_service.h` and the shared implementation in
+`log_service.cpp`. Output goes only to Serial at 115200 baud. Queued messages and
+drop counters are volatile RAM; the logger never writes files, EEPROM or flash.
+RadioLib source and its disabled-by-default internal debug output are unchanged.
+
+Set `FW_LOG_LEVEL` in `log_config.h`, or override it at build time with the same
+definition for all translation units. The default is `FW_LOG_LEVEL_INFO`.
+The supported board script accepts the numeric level, for example
+`THERMISTOR_LOG_LEVEL=5 bash tools/check-board.sh` for TRACE; omit the variable
+to use `log_config.h`.
+
+| Level | Value | Output |
+| --- | --- | --- |
+| `FW_LOG_LEVEL_OFF` | 0 | No serial initialization or output |
+| `FW_LOG_LEVEL_ERROR` | 1 | Failures that stop operation |
+| `FW_LOG_LEVEL_WARN` | 2 | Failed attempts, recovery and degraded operation |
+| `FW_LOG_LEVEL_INFO` | 3 | Startup, joins and transaction summaries |
+| `FW_LOG_LEVEL_DEBUG` | 4 | Clock/radio details and retry decisions |
+| `FW_LOG_LEVEL_TRACE` | 5 | State transitions and application packet hex dumps |
+
+A level includes all more severe messages. Use `LOG_ERROR`, `LOG_WARN`,
+`LOG_INFO`, `LOG_DEBUG`, `LOG_TRACE` and `LOG_TRACE_HEX`; disabled macros do not
+evaluate their arguments or format messages. Output consists of complete lines
+such as `[WARN][LoRaWAN] Join failed: code=-705`. There are no event timestamps.
+The old `clockLogTimestamp()` helper and all raw millis/STIMER capture output
+have been removed. Clock calibration/rate verification, scheduler deadlines,
+rollover protection and fault-message rate limits remain functional timers.
+
+The service owns Serial exclusively and runs on the application's main thread;
+do not use it from interrupts or other threads. Its fixed queue holds twelve
+records, each at most 159 transmitted bytes including CRLF. Three slots are
+reserved against growth by INFO/DEBUG/TRACE messages. Under pressure a more
+severe message may evict an unsent, less severe record; partly transmitted lines
+are never evicted. If no suitable space exists, the incoming record is dropped,
+including ERROR records when the queue is saturated with critical messages.
+Saturating counters retain drop totals by level. Once the queue drains, a Logger
+message reports the totals (WARN, or ERROR in an ERROR-only build). Long lines
+are truncated with `...`; embedded newlines become spaces. Hex dumps use at most
+256 bytes of input. Never include credentials in messages at any level.
+
+`logPump()` checks UART readiness before each single-byte write, with limits of
+64 bytes and 1 ms per call. The Apollo3 serial backend is configured for
+nonblocking writes, and the readiness check also avoids its wrapper's initial
+wait. The queue never waits for space. The main loop services output before
+state processing, including fault/recovery states; safe startup waits and RTC
+measurement polling also service it. No serial draining is added inside
+RadioLib's blocking Class A transactions. Logging resumes after those calls
+return. `logServiceDelay()` divides startup waits into fixed-count slices so a
+faulty millis clock cannot make the logger's startup wait loop unbounded.
 
 ## Clock verification
 
@@ -180,6 +233,7 @@ range; normal network ADR remains enabled.
 
 ```sh
 python3 tests/check_logic.py
+python3 tests/check_logging.py
 bash tools/check-board.sh
 ```
 
@@ -261,6 +315,15 @@ and their real default arguments. It checks XTAL selection on startup and
 recovery, verifies that no TCXO command is requested, and covers radio/RF-switch,
 node-initialization and nonce-restore failure propagation. Low-level hardware
 operations and the node/flash backend are faked.
+Serial checks compile all six levels, verify excluded arguments/strings, shared
+state across translation units, queue overflow/priority, retention of partly
+transmitted lines, truncation/hex formatting, UART backpressure and write errors,
+byte/time budgets across micros rollover, and drop notices. The scheduler check
+also holds the UART unwritable through normal reports and a fault, then verifies
+that error output drains when the UART becomes ready. Set `LOGIC_LOG_LEVEL=0`
+or `LOGIC_LOG_LEVEL=5` to run firmware checks at OFF or TRACE. Optional
+`LOGGING_SANITIZERS=1` enables address/undefined-behavior instrumentation for the
+focused serial checks.
 
 ## Bench check
 

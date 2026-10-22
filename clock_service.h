@@ -5,6 +5,7 @@
 #include "am_mcu_apollo.h"
 
 #include "config.h"
+#include "log_service.h"
 
 // Apollo3 HFADJ defaults used by AmbiqSuite for a 48 MHz HFRC calibrated
 // against the 32.768 kHz crystal: gain 1/2 and a four-second adjustment cycle.
@@ -29,26 +30,17 @@ static bool clockCheckConfiguration() {
   bool stimerUsesHfrcDiv16 =
     (CTIMER->STCFG_b.CLKSEL == CTIMER_STCFG_CLKSEL_HFRC_DIV16);
 
-  Serial.println(F("[Clock] Configuration:"));
-  Serial.print(F("[Clock]   RTC reference: "));
-  Serial.println(rtcUsesXtal ? F("32.768 kHz XTAL") : F("INVALID"));
-  Serial.print(F("[Clock]   HFADJ: "));
-  Serial.println(hfadjEnabled ? F("enabled") : F("disabled"));
-  Serial.print(F("[Clock]   HFADJ target: 0x"));
-  Serial.println(CLKGEN->HFADJ_b.HFXTADJ, HEX);
-  Serial.print(F("[Clock]   HFADJ gain: "));
-  Serial.println(hfadjGainCorrect ? F("1/2") : F("INVALID"));
-  Serial.print(F("[Clock]   HFADJ interval: "));
-  Serial.println(hfadjIntervalCorrect ? F("4 seconds") : F("INVALID"));
-  Serial.print(F("[Clock]   STIMER source: "));
-  Serial.println(stimerUsesHfrcDiv16 ? F("HFRC / 16 (~3 MHz)") : F("INVALID"));
-
-  return rtcUsesXtal &&
-         hfadjEnabled &&
-         hfadjTargetCorrect &&
-         hfadjGainCorrect &&
-         hfadjIntervalCorrect &&
-         stimerUsesHfrcDiv16;
+  bool configured = rtcUsesXtal && hfadjEnabled && hfadjTargetCorrect &&
+    hfadjGainCorrect && hfadjIntervalCorrect && stimerUsesHfrcDiv16;
+  if(!configured) {
+    LOG_ERROR("Clock", "Configuration invalid: rtc_xtal=%u hfadj=%u target_ok=%u gain_ok=%u interval_ok=%u stimer_ok=%u",
+      unsigned(rtcUsesXtal), unsigned(hfadjEnabled), unsigned(hfadjTargetCorrect),
+      unsigned(hfadjGainCorrect), unsigned(hfadjIntervalCorrect), unsigned(stimerUsesHfrcDiv16));
+  } else {
+    LOG_DEBUG("Clock", "RTC=XTAL HFADJ target=0x%lx, gain=1/2, interval=4s; STIMER=HFRC/16",
+      static_cast<unsigned long>(CLKGEN->HFADJ_b.HFXTADJ));
+  }
+  return configured;
 }
 
 // RTC runs from XTAL; STIMER and Arduino millis run from HFRC. This is an
@@ -93,6 +85,7 @@ static bool clockVerifyRateWindow() {
   // Both elapsed-time and poll-count bounds protect against a stopped RTC.
   for(uint32_t polls = 0; polls < 30000 && (millis() - startedMs) < 30000UL; ++polls) {
     delay(1);
+    logPump();
     ClockRateSample end;
     if(!clockReadRateSample(&end)) { continue; }
     uint32_t hundredths = (end.rtcHundredths + 360000UL - start.rtcHundredths) % 360000UL;
@@ -102,12 +95,11 @@ static bool clockVerifyRateWindow() {
       uint32_t expected = hundredths * 30000UL;
       int64_t error = static_cast<int64_t>(elapsedTicks) - expected;
       int32_t ppm = static_cast<int32_t>(error * 1000000LL / expected);
-      Serial.print(F("[Clock] STIMER vs XTAL RTC error (ppm, coarse): "));
-      Serial.println(ppm);
+      LOG_INFO("Clock", "STIMER/XTAL RTC error=%ld ppm (coarse)", static_cast<long>(ppm));
       return ppm >= -2000 && ppm <= 2000;
     }
   }
-  Serial.println(F("[Clock] RTC did not advance within the bounded check."));
+  LOG_WARN("Clock", "RTC did not advance within the bounded check.");
   return false;
 }
 
@@ -115,19 +107,19 @@ static bool clockVerifyRate() {
   am_hal_rtc_osc_enable();
   for(uint8_t attempt = 0; attempt < 3; ++attempt) {
     if(clockVerifyRateWindow()) { return true; }
-    Serial.println(F("[Clock] Measurement invalid or out of tolerance; retrying within startup budget."));
+    LOG_WARN("Clock", "Measurement invalid or out of tolerance; retrying within startup budget.");
     delay(10);
   }
   return false;
 }
 
 bool clockBegin() {
-  Serial.println(F("[Clock] Starting 32.768 kHz crystal ..."));
+  LOG_INFO("Clock", "Starting 32.768 kHz crystal ...");
 
   // HFADJ is not safe on Apollo3 revisions affected by the pre-B0 crystal
   // glitch erratum. Do not trade inaccurate timing for an unstable clock.
   if(!APOLLO3_B0) {
-    Serial.println(F("[Clock] HFADJ requires Apollo3 B0 or newer silicon."));
+    LOG_ERROR("Clock", "HFADJ requires Apollo3 B0 or newer silicon.");
     return false;
   }
 
@@ -136,8 +128,7 @@ bool clockBegin() {
     nullptr
   );
   if(state != AM_HAL_STATUS_SUCCESS) {
-    Serial.print(F("[Clock] Crystal start failed, code "));
-    Serial.println(state);
+    LOG_ERROR("Clock", "Crystal start failed: code=%lu", static_cast<unsigned long>(state));
     return false;
   }
 
@@ -146,14 +137,13 @@ bool clockBegin() {
     nullptr
   );
   if(state != AM_HAL_STATUS_SUCCESS) {
-    Serial.print(F("[Clock] Crystal selection failed, code "));
-    Serial.println(state);
+    LOG_ERROR("Clock", "Crystal selection failed: code=%lu", static_cast<unsigned long>(state));
     return false;
   }
 
   // Ambiq requires two seconds after crystal start/selection before checking
   // its status or using it as the HFADJ reference.
-  delay(CLOCK_XTAL_STABILIZATION_MS);
+  logServiceDelay(CLOCK_XTAL_STABILIZATION_MS);
 
   // A null configuration selects AmbiqSuite's Apollo3 defaults: 48 MHz
   // target, gain 1/2, one-second warmup, and a four-second adjustment cycle.
@@ -162,28 +152,18 @@ bool clockBegin() {
     nullptr
   );
   if(state != AM_HAL_STATUS_SUCCESS) {
-    Serial.print(F("[Clock] HFADJ enable failed, code "));
-    Serial.println(state);
+    LOG_ERROR("Clock", "HFADJ enable failed: code=%lu", static_cast<unsigned long>(state));
     return false;
   }
 
   // One-second HFADJ warmup plus four complete four-second correction cycles.
   // This settling margin is followed by measurement, not assumed convergence.
-  delay(17000);
+  logServiceDelay(17000);
   bool configured = clockCheckConfiguration() && clockVerifyRate() && clockCheckConfiguration();
-  Serial.println(configured
-    ? F("[Clock] Crystal-calibrated system timing ready.")
-    : F("[Clock] Configuration verification failed."));
+  if(configured) { LOG_INFO("Clock", "Crystal-calibrated system timing verified."); }
+  else { LOG_ERROR("Clock", "Timing verification failed."); }
   return configured;
 }
 
-void clockLogTimestamp(const __FlashStringHelper* eventName) {
-  Serial.print(F("[Timing] "));
-  Serial.print(eventName);
-  Serial.print(F(": millis="));
-  Serial.print(millis());
-  Serial.print(F(", stimerTicks="));
-  Serial.println(am_hal_stimer_counter_get());
-}
 
 #endif

@@ -16,8 +16,10 @@ linker = linker.replace('LENGTH = 0x000F0000', 'LENGTH = 0x000EA000')
 linker += '\nASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xFA000, "Firmware overlaps nonce journal")\n'
 pathlib.Path(sys.argv[2]).write_text(linker)
 PY
+python3 "$REPO_DIR/tools/prepare_radiolib.py"   "$TOOLS_DIR/user/libraries/RadioLib" "$BUILD_ROOT/patched-libraries/RadioLib"
 exec "$TOOLS_DIR/bin/arduino-cli" compile \
   --config-file "$TOOLS_DIR/arduino-cli.yaml" \
+  --library "$BUILD_ROOT/patched-libraries/RadioLib" \
   --fqbn SparkFun:apollo3:lora_thing_plus \
   --build-property "compiler.path=$TOOLS_DIR/toolchains/gcc-7-2017q4/bin" \
   --build-property "build.ldscript=$BUILD_ROOT/nonce-guard.ld" \

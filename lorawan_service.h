@@ -8,9 +8,17 @@
 #include <string.h>
 
 #include "config.h"
+
+#if !defined(LORA_USE_OTAA) || (LORA_USE_OTAA != 1)
+#error "OTAA required: ABP needs durable session and frame-counter storage."
+#endif
 #include "clock_service.h"
 #include "eeprom_service.h"
 #include "nonce_store.h"
+
+#ifndef RADIOLIB_THERMISTOR_PROTOCOL_FIXES
+#error "Use tools/check-board.sh: RadioLib 7.1.2 needs the checked protocol fixes."
+#endif
 
 static SX1262 gRadio = new Module(
   LORA_PIN_CS,
@@ -26,6 +34,14 @@ static_assert(RADIOLIB_LORAWAN_NONCES_VERSION_VAL == 1, "Review nonce reservatio
 class PersistentLoRaWANNode : public LoRaWANNode {
 public:
   using LoRaWANNode::LoRaWANNode;
+  bool macCommandsFit() {
+    // Ask the patched library for total capacity before subtracting FOpts.
+    uint8_t pending = fOptsUpLen;
+    fOptsUpLen = 0;
+    size_t capacity = getMaxPayloadLen();
+    fOptsUpLen = pending;
+    return pending <= capacity;
+  }
   uint16_t nextDevNonce() const { return devNonce; }
   void reservedNonces(uint8_t* out, uint16_t highWater) {
     memcpy(out, getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
@@ -229,6 +245,7 @@ bool lwActivate() {
     gReservedNonceLimit = limit > UINT16_MAX ? UINT16_MAX : limit;
     if(!lwSaveNonces()) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
   }
+  gNode.scheduleTransmission(millis());
   state = gNode.activateOTAA();
 #else
   state = gNode.activateABP();
@@ -307,6 +324,7 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
 
 // RadioLib owns region, data-rate, pending FOpts and dwell-time calculations.
 size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
+static bool lwMacCommandsFit() { return gNode.macCommandsFit(); }
 static uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
 
 #endif

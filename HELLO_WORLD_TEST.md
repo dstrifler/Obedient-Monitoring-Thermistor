@@ -26,16 +26,28 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
 STIMER remains on HFRC/16, matching Arduino/mbed. The 32.768-kHz crystal supplies
 RTC time and HFADJ calibration. Startup waits two seconds for the crystal, then
 17 seconds after enabling HFADJ (warmup plus four adjustment cycles). It measures
-STIMER ticks against the crystal-driven RTC over 20 seconds. This is a coarse
+STIMER ticks against the crystal-driven RTC over 20 seconds. Each RTC read is
+bracketed with STIMER samples; samples taking more than 2 ms are rejected and
+retried, with at most five attempts per sample. This handles temporary RTC read
+errors and task preemption without accepting a mismatched timestamp pair.
+Validation allows three measurement windows, each bounded to 30 seconds. This
+is a coarse
 2000-ppm startup sanity check, with RTC endpoint quantization; it is not a proof
-of RF receive-window accuracy. Startup takes approximately 41 seconds including
-the existing serial delay. Failed configuration, a stopped RTC, or out-of-range
+of RF receive-window accuracy. Startup normally takes approximately 41 seconds
+including
+the existing serial delay. Retrying failed windows can extend startup to roughly
+111 seconds when exhausting the three-window timeout budget. Failed
+configuration, a stopped RTC, or out-of-range
 rate pauses radio work with a diagnostic.
 
 ## Nonce persistence and recovery
 
 Before an OTAA request can transmit, a verified journal record reserves the next
-16 DevNonce values. Failed requests consume in-RAM values; reboot skips to the
+16 DevNonce values. RadioLib consumes the composed DevNonce before starting a
+possibly transmitting
+operation, so even a TX timeout consumes it; a missing completion IRQ is not
+proof that the packet stayed off-air. Failed requests consume in-RAM values;
+reboot skips to the
 stored upper bound. A successful join also saves the latest JoinNonce while
 preserving that reservation. The nonce space never wraps. Batching reduces
 flash writes; frequent resets deliberately consume unused reserved values.
@@ -90,6 +102,11 @@ rejoins after reboot.
 Invalid API/configuration errors enter a visible paused state. Airtime deferrals
 use RadioLib's time-until-uplink result. Payload/dwell errors retry after a minute;
 other transient send failures back off from five seconds to a five-minute cap.
+On TX or early RX failure, RadioLib waits through the configured RX2 delay plus
+a conservative two-second recovery guard, puts the radio in standby, and closes
+the abandoned receive-window state before returning the original error. The
+next retry can reach the radio instead of looping on UPLINK_UNAVAILABLE.
+Duty-cycle timing remains anchored to the attempted transmission.
 A receive-side error may occur after actual transmission, so such retries can
 produce additional application messages. Lost activation returns to joining.
 No-join-accept retries remain one minute apart. Radio initialization gets three
@@ -106,7 +123,9 @@ The board script prepares an isolated patched copy of RadioLib 7.1.2. It checks
 library version and the upstream protocol source SHA-256 before making changes;
 the installed upstream library is untouched. The patches saturate payload-limit
 subtraction at zero and fix rollover comparisons in eligibility, transmission,
-join scheduling and receive-window checks. The firmware rejects unpatched builds.
+join scheduling and receive-window checks, plus error-path receive-window cleanup
+and pre-transmission DevNonce consumption. Protocol-fix marker version 2 is
+required so a previously prepared library copy cannot silently omit these fixes. The firmware rejects unpatched builds.
 Use this script for board builds; an ordinary IDE build must also use the
 prepared library and reserved flash layout. The patch implementation is in
 `tools/prepare_radiolib.py`. The host checks need the pristine 7.1.2 library too;
@@ -120,6 +139,10 @@ nonce reservation before TX, nonce exhaustion, absent/real downlinks, scheduler
 cadence/rollover/retries/eligibility/faults, and independent RTC rate checks.
 Regression checks compile actual patched RadioLib payload and transmission/
 eligibility methods, including timer rollover, and test the ABP compile guard.
+Additional checks exercise the complete patched sendReceive path after TX/RX
+errors, timed-out joins with distinct nonces, successful join derivation using
+the transmitted nonce, temporary RTC read errors, delayed samples, and bounded
+failure on a persistently invalid or stopped clock.
 Reclamation tests cover bit-level stale-page erase damage with commit words
 intact, repeated interruption/reboot/retry, and every program byte of the
 intent/snapshot/activation/new-reservation sequence.

@@ -16,7 +16,7 @@
 #include "eeprom_service.h"
 #include "nonce_store.h"
 
-#ifndef RADIOLIB_THERMISTOR_PROTOCOL_FIXES
+#if !defined(RADIOLIB_THERMISTOR_PROTOCOL_FIXES) || (RADIOLIB_THERMISTOR_PROTOCOL_FIXES < 2)
 #error "Use tools/check-board.sh: RadioLib 7.1.2 needs the checked protocol fixes."
 #endif
 
@@ -254,7 +254,7 @@ bool lwActivate() {
   gLastActivationState = state;
 
   // RadioLib owns the Join Request TX and RX1/RX2 scheduling. These boundary
-  // timestamps bracket that unmodified blocking transaction for bench logs.
+  // timestamps bracket that blocking transaction for bench logs.
   clockLogTimestamp(F("OTAA/ABP activation complete"));
 
   if(state == RADIOLIB_LORAWAN_SESSION_RESTORED) {

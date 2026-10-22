@@ -61,22 +61,44 @@ static bool clockReadRtcHundredths(uint32_t* value) {
   return true;
 }
 
-static bool clockVerifyRate() {
-  am_hal_rtc_osc_enable();
-  uint32_t startRtc;
-  if(!clockReadRtcHundredths(&startRtc)) { return false; }
-  uint32_t startTicks = am_hal_stimer_counter_get();
-  // A 20-second window limits RTC's 10-ms endpoint quantization error.
-  // 2000 ppm is a coarse startup sanity limit, not RF timing certification.
-  for(uint32_t polls = 0; polls < 30000; ++polls) {
-    delay(1);
+struct ClockRateSample {
+  uint32_t rtcHundredths;
+  uint32_t stimerTicks;
+};
+
+static bool clockReadRateSample(ClockRateSample* sample) {
+  for(uint8_t attempt = 0; attempt < 5; ++attempt) {
+    uint32_t before = am_hal_stimer_counter_get();
     uint32_t rtc;
-    if(!clockReadRtcHundredths(&rtc)) { return false; }
-    uint32_t ticks = am_hal_stimer_counter_get();
-    uint32_t hundredths = (rtc + 360000UL - startRtc) % 360000UL;
+    bool valid = clockReadRtcHundredths(&rtc);
+    uint32_t after = am_hal_stimer_counter_get();
+    uint32_t span = after - before;
+    // Bracket the RTC read with STIMER samples. Reject a preempted read;
+    // midpoint uncertainty is at most 1 ms, below RTC's 10-ms resolution.
+    if(valid && span <= 6000UL) {
+      sample->rtcHundredths = rtc;
+      sample->stimerTicks = before + span / 2;
+      return true;
+    }
+    delay(1);
+  }
+  return false;
+}
+
+static bool clockVerifyRateWindow() {
+  ClockRateSample start;
+  if(!clockReadRateSample(&start)) { return false; }
+  uint32_t startedMs = millis();
+  // A 20-second window limits RTC's 10-ms endpoint quantization error.
+  // Both elapsed-time and poll-count bounds protect against a stopped RTC.
+  for(uint32_t polls = 0; polls < 30000 && (millis() - startedMs) < 30000UL; ++polls) {
+    delay(1);
+    ClockRateSample end;
+    if(!clockReadRateSample(&end)) { continue; }
+    uint32_t hundredths = (end.rtcHundredths + 360000UL - start.rtcHundredths) % 360000UL;
     if(hundredths >= 2000) {
       if(hundredths > 2100) { return false; }
-      uint32_t elapsedTicks = ticks - startTicks;
+      uint32_t elapsedTicks = end.stimerTicks - start.stimerTicks;
       uint32_t expected = hundredths * 30000UL;
       int64_t error = static_cast<int64_t>(elapsedTicks) - expected;
       int32_t ppm = static_cast<int32_t>(error * 1000000LL / expected);
@@ -86,6 +108,16 @@ static bool clockVerifyRate() {
     }
   }
   Serial.println(F("[Clock] RTC did not advance within the bounded check."));
+  return false;
+}
+
+static bool clockVerifyRate() {
+  am_hal_rtc_osc_enable();
+  for(uint8_t attempt = 0; attempt < 3; ++attempt) {
+    if(clockVerifyRateWindow()) { return true; }
+    Serial.println(F("[Clock] Measurement invalid or out of tolerance; retrying within startup budget."));
+    delay(10);
+  }
   return false;
 }
 

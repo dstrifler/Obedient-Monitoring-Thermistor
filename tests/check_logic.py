@@ -412,13 +412,13 @@ try:
     raise AssertionError('Unsupported RadioLib source was accepted')
 except ValueError:
     pass
-patch_guard = lw[lw.index('#ifndef RADIOLIB_THERMISTOR_PROTOCOL_FIXES'):
-                 lw.index('#endif',lw.index('#ifndef RADIOLIB_THERMISTOR_PROTOCOL_FIXES'))+6]
-for prepared in (False, True):
-    defines = '#define RADIOLIB_THERMISTOR_PROTOCOL_FIXES 1\n' if prepared else ''
+patch_guard = lw[lw.index('#if !defined(RADIOLIB_THERMISTOR_PROTOCOL_FIXES)'):
+                 lw.index('#endif',lw.index('#if !defined(RADIOLIB_THERMISTOR_PROTOCOL_FIXES)'))+6]
+for prepared in (None, 1, 2):
+    defines = '' if prepared is None else '#define RADIOLIB_THERMISTOR_PROTOCOL_FIXES ' + str(prepared) + '\n'
     result = subprocess.run(['g++','-x','c++','-fsyntax-only','-'], input=defines+patch_guard,
                             capture_output=True,text=True)
-    assert (result.returncode==0)==prepared
+    assert (result.returncode==0)==(prepared==2)
 print('PASS: patched-library and source-version guards')
 
 # Exercise the real receive-window entry guard around rollover. The rest of
@@ -542,3 +542,199 @@ int main() {
  assert(nonceStoreScan() && memcmp(gNonceSaved,value,18)==0);
 }
 ''', {'Arduino.h':'','RadioLib.h':'','FlashIAPBlockDevice.h':''})
+
+# Use the complete patched sendReceive path with the real transmitUplink,
+# timing and error cleanup logic; only modem/encryption operations are faked.
+recovery = patched[patched.index('static void radioLibRecoverReceiveWindows('):
+                   patched.index('LoRaWANNode::LoRaWANNode(')]
+send = patched[patched.index('int16_t LoRaWANNode::sendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t fPort, uint8_t* dataDown'):
+               patched.index('void LoRaWANNode::clearNonces()')]
+RADIO_FAKE = r'''
+using RadioLibTime_t=uint32_t;
+#define RADIOLIB_LORAWAN_UPLINK 0
+#define RADIOLIB_LORAWAN_DOWNLINK 1
+#define RADIOLIB_ERR_UNKNOWN -99
+#define RADIOLIB_ERR_NONE 0
+#define RADIOLIB_ERR_NULL_POINTER -1
+#define RADIOLIB_ERR_NETWORK_NOT_JOINED -7
+#define RADIOLIB_ERR_UPLINK_UNAVAILABLE -8
+#define RADIOLIB_LORAWAN_MAC_REKEY 11
+#define RADIOLIB_LORAWAN_FCNT_NONE UINT32_MAX
+#define RADIOLIB_LORAWAN_FRAME_LEN(a,b) ((a)+(b)+32)
+#define RADIOLIB_LORAWAN_FHDR_LEN_START_OFFS 16
+#define RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN 15
+#define RADIOLIB_STATIC_ONLY 0
+#define RADIOLIB_ASSERT(s) do { if((s)!=0) return(s); } while(0)
+#define RADIOLIB_DEBUG_PROTOCOL_PRINTLN(...) ((void)0)
+struct Hal {
+ uint32_t millis() { return ticks; }
+ void delay(uint32_t ms) { assert(ms<=18000); ticks+=ms; }
+};
+struct Module { Hal* hal; };
+struct LoRaWANChannel_t { uint8_t dr=0; uint32_t freq=9150000; };
+struct LoRaWANEvent_t {
+ uint8_t dir=0,datarate=0,fPort=0,nbTrans=0;
+ bool confirmed=false,confirming=false; float freq=0; int power=0; uint32_t fCnt=0;
+};
+struct PhysicalLayer {
+ Module* mod; int calls=0,standbyCalls=0; int16_t result=0;
+ Module* getMod() { return mod; }
+ uint32_t getTimeOnAir(uint8_t) { return 1000; }
+ uint32_t random(uint32_t from,uint32_t) { return from; }
+ int16_t transmit(uint8_t*,uint8_t) { ++calls; return result; }
+ int16_t standby() { ++standbyCalls; return 0; }
+};
+class LoRaWANNode {
+public:
+ PhysicalLayer* phyLayer; LoRaWANChannel_t channels[3];
+ uint32_t rxDelayStart=0,rxDelayEnd=0,tUplink=0,dutyCycle=0,lastToA=0;
+ uint32_t rxDelays[3]={0,1000,2000},fCntUp=0,confFCntDown=UINT32_MAX;
+ uint8_t txPowerMax=0,txPowerSteps=0,adrLimitExp=6,nbTrans=1,maxChanges=0,backoffMax=0,difsSlots=0;
+ uint8_t fOptsUp[15]={},fOptsUpLen=0;
+ bool dutyCycleEnabled=false,csmaEnabled=false,adrEnabled=false,active=true;
+ int16_t receiveResult=0;
+ bool isActivated() { return active; }
+ void clearSession() { active=false; }
+ int16_t getMacPayload(uint8_t,uint8_t*,uint8_t,uint8_t*,uint8_t) { return -1; }
+ int16_t isValidUplink(uint8_t*,uint8_t) { return 0; }
+ void composeUplink(const uint8_t*,size_t, uint8_t* out,uint8_t,bool) { memset(out,0,32); }
+ void selectChannels() {}
+ void micUplink(uint8_t*,size_t) {}
+ bool csmaChannelClear(uint8_t,uint8_t) { return true; }
+ uint32_t dutyCycleInterval(uint32_t interval,uint32_t) { return interval; }
+ int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) { return 0; }
+ int16_t receiveCommon(uint8_t,LoRaWANChannel_t*,uint32_t*,uint8_t,uint32_t) {
+   if(receiveResult<0) return receiveResult; // early RX setup error leaves old end timestamp
+   rxDelayEnd=ticks; return receiveResult;
+ }
+ void adrBackoff() {}
+ static void clearMacCommands(uint8_t*,uint8_t* len,uint8_t) { *len=0; }
+ int16_t parseDownlink(uint8_t*,size_t* len,LoRaWANEvent_t*) { *len=3; return 0; }
+ RadioLibTime_t timeUntilUplink();
+ int16_t transmitUplink(LoRaWANChannel_t*,uint8_t*,uint8_t,bool);
+ int16_t sendReceive(const uint8_t*,size_t,uint8_t,uint8_t*,size_t*,bool,LoRaWANEvent_t*,LoRaWANEvent_t*);
+};
+'''
+run('radio_transaction_error_recovery', COMMON + RADIO_FAKE + recovery + time_until + transmit + send + r'''
+int main() {
+ Hal hal; Module mod; mod.hal=&hal; PhysicalLayer phy; phy.mod=&mod;
+ uint8_t up[11]={},down[255]={}; size_t received=0;
+ for(uint32_t start : {1000UL, UINT32_MAX-1000UL}) {
+   LoRaWANNode node; node.phyLayer=&phy; ticks=start; node.tUplink=ticks;
+   node.rxDelayStart=ticks-1000; node.rxDelayEnd=ticks-500;
+   phy.result=-5; int calls=phy.calls;
+   assert(node.sendReceive(up,11,1,down,&received,false,nullptr,nullptr)==-5);
+   assert(uint32_t(ticks-start)==4000 && int32_t(node.rxDelayEnd-node.rxDelayStart)>=0);
+   node.dutyCycleEnabled=true; node.dutyCycle=10000;
+   assert(node.timeUntilUplink()==6000); // duty-cycle accounting survives cleanup
+   ticks+=6000; phy.result=0;
+   assert(node.sendReceive(up,11,1,down,&received,false,nullptr,nullptr)==0 && phy.calls==calls+2);
+ }
+ LoRaWANNode node; node.phyLayer=&phy; ticks=20000;
+ node.receiveResult=-6; int calls=phy.calls;
+ assert(node.sendReceive(up,11,1,down,&received,false,nullptr,nullptr)==-6);
+ assert(ticks==24000 && int32_t(node.rxDelayEnd-node.rxDelayStart)>=0);
+ node.receiveResult=0;
+ assert(node.sendReceive(up,11,1,down,&received,false,nullptr,nullptr)==0 && phy.calls==calls+2);
+ // Long negotiated RX delays must be respected before retry, including time 0.
+ ticks=0; node.rxDelayStart=0; node.rxDelayEnd=0; node.tUplink=0;
+ node.rxDelays[2]=16000; phy.result=-5;
+ assert(node.sendReceive(up,11,1,down,&received,false,nullptr,nullptr)==-5 && ticks==18000);
+ phy.result=0; uint32_t healthyStart=ticks;
+ assert(node.sendReceive(up,11,1,down,&received,false,nullptr,nullptr)==0 && ticks==healthyStart);
+}
+''')
+
+run('clock_transient_reads_and_sampling', COMMON + r'''
+struct am_hal_rtc_time_t { uint32_t ui32ReadError,ui32Minute,ui32Second,ui32Hundredths; };
+uint32_t epoch=0,rtcStart=0,rate=3000;
+unsigned reads=0,failAt=0,failures=0,jitterAt=0;
+bool invalid=false,frozen=false;
+void am_hal_rtc_osc_enable() {}
+uint32_t am_hal_stimer_counter_get() { return ticks*rate; }
+uint32_t am_hal_rtc_time_get(am_hal_rtc_time_t* t) {
+ ++reads;
+ uint32_t h=(rtcStart+(frozen?0:uint32_t(ticks-epoch)/10))%360000;
+ t->ui32Minute=h/6000;t->ui32Second=(h/100)%60;t->ui32Hundredths=h%100;
+ bool error=invalid || (failAt && reads>=failAt && failures);
+ if(failAt && reads>=failAt && failures) --failures;
+ t->ui32ReadError=error;
+ if(reads==jitterAt) ticks+=100; // preemption after RTC sampling, before STIMER
+ return error;
+}
+''' + clock + r'''
+void resetClock(uint32_t start=0) {
+ ticks=start;epoch=start;rate=3000;rtcStart=0;reads=0;failAt=0;failures=0;jitterAt=0;invalid=false;frozen=false;
+}
+int main() {
+ resetClock(); failAt=100;failures=1;assert(clockVerifyRate());
+ resetClock(); failAt=1;failures=6;assert(clockVerifyRate()); // bounded window retry
+ resetClock(); jitterAt=1;assert(clockVerifyRate());
+ resetClock(); jitterAt=100;assert(clockVerifyRate());
+ resetClock(UINT32_MAX-10000);rtcStart=359900;assert(clockVerifyRate());
+ resetClock();invalid=true;assert(!clockVerifyRate() && reads<=15);
+ resetClock();frozen=true;assert(!clockVerifyRate() && ticks<=90100);
+ resetClock();rate=3030;assert(!clockVerifyRate());
+}
+''')
+
+join_method = patched[patched.index('int16_t LoRaWANNode::activateOTAA('):patched.index('int16_t LoRaWANNode::activateABP(')]
+run('actual_join_nonce_consumption', COMMON + r'''
+using RadioLibTime_t=uint32_t;
+#define RADIOLIB_ERR_UNKNOWN -99
+#define RADIOLIB_ERR_NONE 0
+#define RADIOLIB_LORAWAN_SESSION_RESTORED -1117
+#define RADIOLIB_LORAWAN_NEW_SESSION -1118
+#define RADIOLIB_ERR_DWELL_TIME_EXCEEDED -1114
+#define RADIOLIB_ERR_NO_JOIN_ACCEPT -1116
+#define RADIOLIB_LORAWAN_NONCES_ACTIVE 0
+#define RADIOLIB_LORAWAN_NONCES_DEV_NONCE 10
+#define RADIOLIB_LORAWAN_JOIN_REQUEST_LEN 23
+#define RADIOLIB_LORAWAN_MODE_OTAA 1
+#define RADIOLIB_LORAWAN_UPLINK 0
+#define RADIOLIB_LORAWAN_DOWNLINK 1
+#define RADIOLIB_LORAWAN_JOIN_ACCEPT_DELAY_1_MS 5000
+#define RADIOLIB_LORAWAN_JOIN_ACCEPT_DELAY_2_MS 6000
+#define RADIOLIB_ASSERT(s) do { if((s)!=0) return(s); } while(0)
+#define RADIOLIB_DEBUG_PROTOCOL_PRINTLN(...) ((void)0)
+#define RADIOLIB_DEBUG_PROTOCOL_HEXDUMP(...) ((void)0)
+struct Hal { uint32_t millis() { return ticks; } void delay(uint32_t ms) { ticks+=ms; } };
+struct Module { Hal* hal; };
+struct Channel {};
+struct LoRaWANJoinEvent_t { bool newSession; uint16_t devNonce; uint32_t joinNonce; };
+struct Phy {
+ Module* mod; std::vector<uint16_t> attempted; int16_t result=-5;
+ Module* getMod() { return mod; }
+ uint32_t getTimeOnAir(uint8_t) { return 1000; }
+ int16_t transmit(uint8_t* data,uint8_t) {
+   attempted.push_back(data[0] | uint16_t(data[1])<<8); return result;
+ }
+};
+class LoRaWANNode {
+public:
+ Phy* phyLayer; Channel channels[3];
+ uint8_t bufferNonces[18]={},txPowerMax=0,txPowerSteps=0;
+ uint16_t devNonce=0,dwellTimeUp=0; uint32_t joinNonce=0,tUplink=0,rxDelayStart=0,lastToA=0,rxDelays[3]={};
+ bool isActive=false;
+ bool isActivated() { return isActive; }
+ void createSession(uint8_t,uint8_t) {}
+ void composeJoinRequest(uint8_t* data) { data[0]=devNonce&255;data[1]=devNonce>>8; }
+ int16_t selectChannels() { return 0; }
+ int16_t setPhyProperties(Channel*,uint8_t,int) { return 0; }
+ int16_t receiveCommon(uint8_t,Channel*,uint32_t*,uint8_t,uint32_t) { return 1; }
+ int16_t processJoinAccept(LoRaWANJoinEvent_t*) { assert(uint16_t(devNonce-1)==phyLayer->attempted.back()); return 0; }
+ template<class T> void hton(uint8_t* data,T val) { for(size_t i=0;i<sizeof(T);++i)data[i]=val>>(8*i); }
+ int16_t activateOTAA(uint8_t dr=0,LoRaWANJoinEvent_t* event=nullptr);
+};
+''' + join_method + r'''
+int main() {
+ Hal hal; Module mod; mod.hal=&hal; Phy phy; phy.mod=&mod;
+ LoRaWANNode node; node.phyLayer=&phy;
+ ticks=1000; assert(node.activateOTAA()==-5); ticks+=60000;
+ assert(node.activateOTAA()==-5);
+ assert(phy.attempted.size()==2 && phy.attempted[0]==0 && phy.attempted[1]==1 && node.devNonce==2);
+ phy.result=0; ticks+=60000;
+ assert(node.activateOTAA()==RADIOLIB_LORAWAN_NEW_SESSION);
+ assert(phy.attempted.back()==2 && node.devNonce==3);
+}
+''')

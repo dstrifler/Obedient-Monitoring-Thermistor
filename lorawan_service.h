@@ -212,6 +212,16 @@ int16_t lwRestore() {
 // ACTIVATE / JOIN NETWORK
 // ============================================================
 
+static bool lwRecover() {
+  if(!gPersistenceHealthy) { return false; }
+  // The scheduler calls this only after its receive-window cooldown. Recreate
+  // our node through its constructor, then use the normal public init/restore
+  // APIs. No session counters are reused after discarding an uncertain session.
+  gNode = PersistentLoRaWANNode(&gRadio, &gRegion, LORA_SUB_BAND);
+  if(!lwBegin()) { return false; }
+  return lwRestore() == RADIOLIB_ERR_NONE && gPersistenceHealthy;
+}
+
 bool lwActivate() {
   int16_t state = RADIOLIB_ERR_NETWORK_NOT_JOINED;
 
@@ -255,6 +265,22 @@ bool lwActivate() {
     Serial.println(F("[LoRaWAN] Successfully started new session!"));
     return true;
   }
+
+#if (LORA_USE_OTAA == 1)
+  if(!gNode.isActivated() && gNode.nextDevNonce() == next) {
+    // An error before the library's increment does not prove there was no RF.
+    // Skip the remainder of the verified reservation using the public restore
+    // API. The next attempt must reserve a new batch before transmitting.
+    int16_t restoreState = gNode.setBufferNonces(gLWnonces);
+    if(restoreState != RADIOLIB_ERR_NONE) {
+      gPersistenceHealthy = false;
+      gLastActivationState = restoreState;
+      Serial.println(F("[Persistence] Cannot skip uncertain join nonce; joining disabled."));
+      return false;
+    }
+    Serial.println(F("[Persistence] Uncertain join attempt; skipped to reserved nonce bound."));
+  }
+#endif
 
   Serial.print(F("[LoRaWAN] Join failed, code "));
   Serial.println(state);

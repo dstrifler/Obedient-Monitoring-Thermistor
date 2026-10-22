@@ -130,7 +130,8 @@ constexpr int16_t RADIOLIB_ERR_NULL_POINTER=-1, RADIOLIB_ERR_INVALID_PORT=-2,
  RADIOLIB_ERR_NETWORK_NOT_JOINED=-7, RADIOLIB_ERR_UPLINK_UNAVAILABLE=-8,
  RADIOLIB_ERR_PACKET_TOO_LONG=-9, RADIOLIB_ERR_DWELL_TIME_EXCEEDED=-10;
 bool activated=false, joinWorks=true, persistence=true;
-int joins=0, sendResult=0, activationResult=-42;
+int joins=0, recoveries=0, sendResult=0, activationResult=-42;
+bool recoveryWorks=true;
 size_t limit=11;
 uint32_t eligibleAt=0;
 std::vector<uint32_t> sends;
@@ -138,6 +139,7 @@ std::vector<size_t> lengths;
 bool clockBegin() { return true; }
 bool eepromBootstrap() { return true; }
 bool lwBegin() { return true; }
+bool lwRecover() { ++recoveries; if(!recoveryWorks)return false; activated=false;return true; }
 int16_t lwRestore() { return 0; }
 bool lwPersistenceHealthy() { return persistence; }
 int16_t lwLastActivationState() { return activationResult; }
@@ -158,7 +160,7 @@ void advance(uint32_t ms) { uint32_t start=ticks; while(uint32_t(ticks-start)<ms
 void reset() {
  ticks=0; activated=false; joinWorks=true; persistence=true; sendResult=0; limit=11;
  eligibleAt=0; joins=0; sends.clear(); lengths.clear();
- gRetryBackoffMs=5000; gMacOnlyAttempts=0; gReportWaitMs=60000; setup();
+ gRetryBackoffMs=5000; gUnavailableAttempts=0; gRecoveryAttempts=0; recoveries=0; recoveryWorks=true; gReportWaitMs=60000; setup();
 }
 int main() {
  // Waiting for a tick sleeps through the idle interval, including rollover.
@@ -172,7 +174,7 @@ int main() {
  reset(); joinWorks=false; advance(59000); assert(sends.empty() && joins==1);
  joinWorks=true; advance(1500); assert(sends.size()==1);
  reset(); limit=8; advance(500); assert(lengths.size()==1 && lengths[0]==0);
- limit=11; advance(5500); assert(lengths.size()==2 && lengths[1]==11);
+ limit=11; advance(61000); assert(lengths.size()==2 && lengths[1]==11);
  reset(); eligibleAt=ticks+10000; advance(500); assert(sends.empty()); advance(10100); assert(sends.size()==1);
  reset(); sendResult=-42; advance(500); assert(sends.size()==1);
  advance(5500); assert(sends.size()==2); advance(10000); assert(sends.size()==3);
@@ -183,13 +185,38 @@ int main() {
  reset(); sendResult=RADIOLIB_ERR_NETWORK_NOT_JOINED; advance(200); sendResult=0; advance(1000); assert(joins==2);
  reset(); ticks=UINT32_MAX-32000; eligibleAt=ticks; gNextSchedulerTickMs=ticks; gLastJoinAttemptMs=ticks-60000;
  advance(500); advance(61000); assert(sends.size()==2 && uint32_t(sends[1]-sends[0])>=60000);
- reset(); limit=8; sendResult=-42; advance(80000);
- assert(gMacOnlyAttempts==0 && sends.size()>=4 && gSchedulerState!=SCHED_FAULT);
- sendResult=0; advance(90000); assert(gMacOnlyAttempts>=1);
- limit=11; advance(7000); assert(gMacOnlyAttempts==0);
- gMacOnlyAttempts=3; activated=false; gSchedulerState=SCHED_WAIT_FOR_JOIN;
- gLastJoinAttemptMs=ticks-60000; advance(1000); assert(gMacOnlyAttempts==0);
- reset(); limit=0; advance(20000); assert(gSchedulerState==SCHED_FAULT && sends.size()==3);
+ // Persistent MAC responses continue at one-minute intervals until room returns.
+ reset(); limit=10; advance(480000);
+ assert(sends.size()==8 && gSchedulerState!=SCHED_FAULT);
+ for(size_t i=0;i<lengths.size();++i) {
+   assert(lengths[i]==0);
+   if(i) assert(uint32_t(sends[i]-sends[i-1])>=60000);
+ }
+ limit=11;advance(61000);assert(lengths.back()==11 && recoveries==0);
+ // A newly joined session gets the initial retry delay, even after a long fault.
+ reset(); sendResult=-42;advance(400000);assert(gRetryBackoffMs==300000);
+ activated=false;gSchedulerState=SCHED_WAIT_FOR_JOIN;gLastJoinAttemptMs=ticks-60000;
+ assert(ensureJoined() && gRetryBackoffMs==5000);
+ gSchedulerState=SCHED_SEND_UPLINK;loop();assert(gReportWaitMs==5000);
+ // Unavailable with no airtime wait gets three retries, then a quiet cooldown.
+ reset();sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;advance(12000);
+ assert(sends.size()==3 && gSchedulerState==SCHED_RECOVER_RADIO && recoveries==0);
+ uint32_t recoveryStart=gRecoveryStartedMs;
+ advance(58000);assert(recoveries==0 && sends.size()==3);
+ sendResult=0;advance(4000);
+ assert(uint32_t(ticks-recoveryStart)>=60000 && recoveries==1 && joins==2 && sends.size()==4);
+ // A real duty-cycle deferral does not consume the stuck-state counter.
+ reset();sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;advance(1000);
+ eligibleAt=ticks+10000;advance(6000);assert(gUnavailableAttempts==0 && recoveries==0);
+ // Three failed recoveries stop; persistence errors stop on the first attempt.
+ reset();recoveryWorks=false;scheduleRadioRecovery();advance(181000);
+ assert(recoveries==3 && gSchedulerState==SCHED_FAULT);
+ reset();recoveryWorks=false;persistence=false;scheduleRadioRecovery();advance(61000);
+ assert(recoveries==1 && gSchedulerState==SCHED_FAULT);
+ // The cooldown is elapsed-time based across uint32 rollover.
+ reset();ticks=UINT32_MAX-30000;gNextSchedulerTickMs=ticks;scheduleRadioRecovery();
+ advance(59000);assert(recoveries==0);advance(2000);assert(recoveries==1);
+
 }
 ''')
 
@@ -234,12 +261,14 @@ constexpr int16_t RADIOLIB_ERR_NONE=0, RADIOLIB_ERR_NETWORK_NOT_JOINED=-7,
  LW_ERR_PERSISTENCE=-32000, LW_ERR_NONCE_EXHAUSTED=-31999, LW_ERR_INVALID_ARGUMENT=-100;
 uint8_t durable[18]={};
 bool saveWorks=true, joinWorks=false;
+int16_t nonceRestoreResult=0;
 int radioCalls=0, receiveResult=0;
 struct LoRaWANEvent_t { uint32_t fCnt=0; float freq=0; uint8_t datarate=0; };
 uint16_t durableLimit() { return durable[10] | (uint16_t(durable[11])<<8); }
 class LoRaWANNode {
 protected:
  uint16_t devNonce=0;
+ bool active=false;
  uint8_t buffer[18]={};
  template<class T> static void hton(uint8_t* p,T val) { for(size_t i=0;i<sizeof(T);++i) p[i]=val>>(8*i); }
  static uint16_t checkSum16(const uint8_t* p,uint16_t len) {
@@ -249,12 +278,16 @@ public:
  LoRaWANNode()=default;
  uint8_t* getBufferNonces() { hton<uint16_t>(buffer+10,devNonce); return buffer; }
  void scheduleTransmission(uint32_t) {}
- void restore(uint16_t next) { devNonce=next; }
+ void restore(uint16_t next) { devNonce=next;active=false; }
+ bool isActivated() { return active; }
+ int16_t setBufferNonces(const uint8_t* p) {
+  if(nonceRestoreResult)return nonceRestoreResult;
+  memcpy(buffer,p,18);devNonce=p[10]|uint16_t(p[11])<<8;active=false;return 0;
+ }
  int16_t activateOTAA() {
    // Model successful TX followed by either JoinAccept or no JoinAccept.
-   // Stock RadioLib's pre-increment TX-error path is an unresolved limitation.
    assert(durableLimit()>devNonce); ++radioCalls; ++devNonce;
-   return joinWorks?RADIOLIB_LORAWAN_NEW_SESSION:-42;
+   active=joinWorks;return joinWorks?RADIOLIB_LORAWAN_NEW_SESSION:-42;
  }
  size_t getMaxPayloadLen() { return 11; }
  int16_t sendReceive(const uint8_t*,size_t,uint8_t,uint8_t*,size_t* len,bool,LoRaWANEvent_t*,LoRaWANEvent_t*) {
@@ -466,3 +499,210 @@ with tempfile.TemporaryDirectory(prefix='thermistor-library-check-') as tmp:
             raise AssertionError('Modified dependency accepted: ' + relative)
         target.write_bytes(before[relative])
 print('PASS: stock RadioLib verification (read only)', flush=True)
+
+# Integrate the firmware with unchanged upstream methods and its actual nonce
+# schema. Only the modem, cryptography/session setup, and flash I/O are faked.
+radio_source = (upstream / 'src/protocols/LoRaWAN/LoRaWAN.cpp').read_text()
+radio_header = (upstream / 'src/protocols/LoRaWAN/LoRaWAN.h').read_text()
+
+
+def radio_method(signature):
+    start = radio_source.index(signature)
+    return radio_source[start:radio_source.index('\n}\n', start) + 3]
+
+
+schema_start = radio_header.index('#define RADIOLIB_LORAWAN_NONCES_VERSION_VAL')
+schema = radio_header[schema_start:radio_header.index('enum LoRaWANSchemeSession_t', schema_start)]
+templates = radio_header[radio_header.index('template<typename T>\nT LoRaWANNode::ntoh'):radio_header.rindex('#endif')]
+stock_methods = ''.join(radio_method(signature) for signature in (
+    'uint8_t* LoRaWANNode::getBufferNonces()',
+    'int16_t LoRaWANNode::setBufferNonces(',
+    'int16_t LoRaWANNode::checkBufferCommon(',
+    'uint16_t LoRaWANNode::checkSum16(',
+    'int16_t LoRaWANNode::activateOTAA(',
+    'int16_t LoRaWANNode::transmitUplink(',
+    'RadioLibTime_t LoRaWANNode::timeUntilUplink()',
+))
+recover = lw[lw.index('static bool lwRecover()'):lw.index('bool lwActivate()')]
+STOCK_FAKE = r'''
+using RadioLibTime_t=uint32_t;
+#define LORA_USE_OTAA 1
+#define LORA_UPLINK_FPORT 1
+#define LORA_SUB_BAND 2
+#define RADIOLIB_ERR_UNKNOWN -99
+#define RADIOLIB_ERR_NONE 0
+#define RADIOLIB_ERR_NO_JOIN_ACCEPT -1116
+#define RADIOLIB_ERR_NONCES_DISCARDED -1115
+#define RADIOLIB_ERR_CHECKSUM_MISMATCH -1114
+#define RADIOLIB_LORAWAN_SESSION_RESTORED -1117
+#define RADIOLIB_LORAWAN_NEW_SESSION -1118
+#define RADIOLIB_LORAWAN_JOIN_REQUEST_LEN 23
+#define RADIOLIB_LORAWAN_MODE_OTAA 1
+#define RADIOLIB_LORAWAN_UPLINK 0
+#define RADIOLIB_LORAWAN_DOWNLINK 1
+#define RADIOLIB_LORAWAN_JOIN_ACCEPT_DELAY_1_MS 5000
+#define RADIOLIB_LORAWAN_JOIN_ACCEPT_DELAY_2_MS 6000
+#define RADIOLIB_ASSERT(s) do { if((s)!=0) return(s); } while(0)
+#define RADIOLIB_DEBUG_PROTOCOL_PRINTLN(...) ((void)0)
+#define RADIOLIB_DEBUG_PROTOCOL_HEXDUMP(...) ((void)0)
+struct Hal { uint32_t millis() { return ticks; } void delay(uint32_t ms) { ticks+=ms; } };
+struct Module { Hal* hal; };
+struct LoRaWANChannel_t {};
+struct Band { uint8_t bandNum=1; };
+struct LoRaWANJoinEvent_t { bool newSession; uint16_t devNonce; uint32_t joinNonce; };
+struct LoRaWANEvent_t { uint32_t fCnt=0;float freq=0;uint8_t datarate=0; };
+uint16_t durableLimit();
+struct Phy {
+ Module* mod=nullptr;
+ int16_t joinResult=0,uplinkResult=0;
+ unsigned uplinkCalls=0;
+ std::vector<uint16_t> attempted;
+ Module* getMod() { return mod; }
+ uint32_t getTimeOnAir(uint8_t) { return 1000; }
+ int16_t transmit(uint8_t* data,uint8_t len) {
+  if(len==23) {
+   uint16_t nonce=data[0]|uint16_t(data[1])<<8;
+   assert(nonce<durableLimit());attempted.push_back(nonce);return joinResult;
+  }
+  ++uplinkCalls;return uplinkResult;
+ }
+ void standby() {}
+};
+class LoRaWANNode {
+public:
+ Phy* phyLayer;Band* band;LoRaWANChannel_t channels[3];
+ uint8_t bufferNonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE]={},txPowerMax=0,txPowerSteps=0;
+ uint16_t devNonce=0,keyCheckSum=0x1234,lwMode=1,dwellTimeUp=0;
+ uint8_t lwClass=0;
+ uint32_t joinNonce=0,tUplink=0,rxDelayStart=0,rxDelayEnd=0,lastToA=0,dutyCycle=0;
+ uint32_t rxDelays[3]={};bool isActive=false,dutyCycleEnabled=false;
+ LoRaWANNode(Phy* phy=nullptr,Band* region=nullptr,uint8_t=0):phyLayer(phy),band(region) {}
+ bool isActivated() { return isActive; }
+ void createSession(uint8_t,uint8_t) { isActive=false; }
+ void composeJoinRequest(uint8_t* data) { hton<uint16_t>(data,devNonce); }
+ int16_t selectChannels() { return 0; }
+ int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) { return 0; }
+ int16_t receiveCommon(uint8_t,LoRaWANChannel_t*,uint32_t*,uint8_t,uint32_t) {
+  ticks+=6000;rxDelayEnd=ticks;return joinReceiveResult;
+ }
+ int16_t processJoinAccept(LoRaWANJoinEvent_t*) {
+  assert(uint16_t(devNonce-1)==phyLayer->attempted.back());
+  ++joinNonce;hton<uint32_t>(bufferNonces+RADIOLIB_LORAWAN_NONCES_JOIN_NONCE,joinNonce,3);
+  bufferNonces[RADIOLIB_LORAWAN_NONCES_ACTIVE]=1;isActive=true;return 0;
+ }
+ void scheduleTransmission(uint32_t when) { tUplink=when; }
+ uint32_t dutyCycleInterval(uint32_t interval,uint32_t) { return interval; }
+ uint8_t getMaxPayloadLen() { return 11; }
+ int16_t sendReceive(const uint8_t* data,size_t len,uint8_t,uint8_t*,size_t*,bool,LoRaWANEvent_t*,LoRaWANEvent_t*) {
+  if(!isActive)return RADIOLIB_ERR_NETWORK_NOT_JOINED;
+  LoRaWANChannel_t channel;
+  int16_t result=transmitUplink(&channel,const_cast<uint8_t*>(data),uint8_t(len),false);
+  if(result==0) { ticks+=2000;rxDelayEnd=ticks; }
+  return result;
+ }
+ static int joinReceiveResult;
+ static uint16_t checkSum16(const uint8_t*,uint16_t);
+ static int16_t checkBufferCommon(const uint8_t*,uint16_t);
+ template<class T> static void hton(uint8_t*,T,size_t=0);
+ template<class T> static T ntoh(const uint8_t*,size_t=0);
+ uint8_t* getBufferNonces();
+ int16_t setBufferNonces(const uint8_t*);
+ int16_t activateOTAA(uint8_t=0,LoRaWANJoinEvent_t* =nullptr);
+ int16_t transmitUplink(LoRaWANChannel_t*,uint8_t*,uint8_t,bool);
+ RadioLibTime_t timeUntilUplink();
+};
+int LoRaWANNode::joinReceiveResult=1;
+'''
+# Reuse the scheduler's error vocabulary, not its fake service functions.
+error_constants = FAKES[:FAKES.index('bool activated=')]
+STOCK_STATE = r'''
+Hal hal;Module mod;Phy gRadio;Band gRegion;
+static PersistentLoRaWANNode gNode(&gRadio,&gRegion,LORA_SUB_BAND);
+static uint16_t gReservedNonceLimit=0;
+static bool gPersistenceHealthy=true;
+static int16_t gLastActivationState=0;
+static uint8_t gLWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+uint8_t durable[RADIOLIB_LORAWAN_NONCES_BUF_SIZE]={};
+bool haveDurable=false,saveWorks=true,initWorks=true,loadWorks=true;
+unsigned initializations=0;
+uint16_t durableLimit() {
+ return LoRaWANNode::ntoh<uint16_t>(durable+RADIOLIB_LORAWAN_NONCES_DEV_NONCE);
+}
+bool nonceStoreSave(const uint8_t* p) {
+ if(!saveWorks) { return false; }
+ memcpy(durable,p,sizeof(durable));haveDurable=true;return true;
+}
+bool lwBegin() {
+ ++initializations;
+ assert(!gNode.isActivated() && gNode.rxDelayStart==0 && gNode.rxDelayEnd==0);
+ return initWorks;
+}
+int16_t lwRestore() {
+ if(!loadWorks) { gPersistenceHealthy=false;return LW_ERR_PERSISTENCE; }
+ int16_t state=haveDurable?gNode.setBufferNonces(durable):0;
+ gPersistenceHealthy=state==0;gReservedNonceLimit=gNode.nextDevNonce();return state;
+}
+bool clockBegin() { return true; }
+bool eepromBootstrap() { return true; }
+void clockLogTimestamp(const char*) {}
+bool lwIsActivated() { return gNode.isActivated(); }
+bool lwPersistenceHealthy() { return gPersistenceHealthy; }
+int16_t lwLastActivationState() { return gLastActivationState; }
+size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
+uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
+'''
+stock_integration = (COMMON + error_constants + schema + STOCK_FAKE + templates +
+                     stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
+run('stock_join_nonce_skip_and_recovery', stock_integration + r'''
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;ticks=1000;
+ gRadio.joinResult=-42;
+ assert(!lwActivate() && gNode.nextDevNonce()==16 && durableLimit()==16);
+ ticks+=60000;
+ assert(!lwActivate() && gNode.nextDevNonce()==32 && durableLimit()==32);
+ assert(gRadio.attempted[0]==0 && gRadio.attempted[1]==16);
+ // A successful request TX without JoinAccept uses normal per-request batching.
+ gRadio.joinResult=0;LoRaWANNode::joinReceiveResult=0;ticks+=60000;
+ assert(!lwActivate() && gNode.nextDevNonce()==33 && durableLimit()==48);
+ LoRaWANNode::joinReceiveResult=1;ticks+=60000;
+ assert(lwActivate() && gNode.joinNonce==1 && durableLimit()==48);
+ // Recreate our node and restore both the reserved bound and accepted JoinNonce.
+ ticks+=60000;gNode.rxDelayStart=ticks;gNode.rxDelayEnd=ticks-1;
+ assert(lwRecover() && !lwIsActivated() && gNode.nextDevNonce()==48 && gNode.joinNonce==1);
+ assert(gNode.rxDelayStart==0 && gNode.rxDelayEnd==0);
+ assert(lwActivate() && gRadio.attempted.back()==48 && durableLimit()==64);
+ // A bad reservation buffer must stop joining if uncertain-nonce restore fails.
+ assert(lwRecover());LoRaWANNode::joinReceiveResult=0;
+ assert(!lwActivate() && gNode.nextDevNonce()==65 && durableLimit()==80);
+ gLWnonces[RADIOLIB_LORAWAN_NONCES_SIGNATURE]^=1;gRadio.joinResult=-42;
+ assert(!lwActivate() && !gPersistenceHealthy && gLastActivationState==RADIOLIB_ERR_CHECKSUM_MISMATCH);
+ size_t attempts=gRadio.attempted.size();assert(!lwActivate() && gRadio.attempted.size()==attempts);
+ // Neither an exhausted reservation nor a failed write may authorize RF.
+ gPersistenceHealthy=true;gNode.isActive=false;gNode.devNonce=65534;gReservedNonceLimit=65535;
+ gNode.reservedNonces(gLWnonces,65535);assert(nonceStoreSave(gLWnonces));
+ assert(!lwActivate() && gNode.nextDevNonce()==65535);
+ attempts=gRadio.attempted.size();assert(!lwActivate() && gLastActivationState==LW_ERR_NONCE_EXHAUSTED);
+ assert(gRadio.attempted.size()==attempts);
+ gNode.devNonce=100;gReservedNonceLimit=100;saveWorks=false;
+ assert(!lwActivate() && !gPersistenceHealthy && gRadio.attempted.size()==attempts);
+ gPersistenceHealthy=true;loadWorks=false;
+ assert(!lwRecover() && !gPersistenceHealthy && !lwIsActivated());
+}
+''')
+run('stock_transmit_scheduler_recovery', stock_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();gRadio.uplinkResult=-42;
+ advance(25000);
+ assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.uplinkCalls==1 && initializations==1);
+ assert(gRadio.attempted.size()==1 && gRadio.attempted[0]==0);
+ uint32_t recoveryStart=gRecoveryStartedMs;
+ advance(50000);assert(initializations==1 && gRadio.uplinkCalls==1);
+ gRadio.uplinkResult=0;advance(20000);
+ assert(uint32_t(ticks-recoveryStart)>=60000);
+ assert(initializations==2 && gRadio.uplinkCalls==2 && gSchedulerState!=SCHED_FAULT);
+ assert(gRadio.attempted.size()==2 && gRadio.attempted[1]==16);
+ assert(gRetryBackoffMs==5000 && gUnavailableAttempts==0);
+ advance(61000);assert(gRadio.uplinkCalls==3);
+}
+''')

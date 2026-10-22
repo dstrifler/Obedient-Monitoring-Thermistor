@@ -12,11 +12,11 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   application packets are scheduled 60 seconds apart, subject to radio/network
   eligibility and transaction overhead.
 - Empty application transactions can carry pending MAC commands when the live
-  payload limit cannot fit the text. Three completed clearance transactions
-  that still cannot make room stop
-  application work with a diagnostic. Radio failures do not consume this budget;
-  a new session resets it. Payload eligibility comes from stock RadioLib; see
-  its remaining limitations below.
+  payload limit cannot fit the text. Persistent MAC responses may need further
+  downlinks; successful maintenance transactions continue at the normal
+  one-minute cadence while the text stays pending. They do not trigger a
+  three-attempt fault. Payload eligibility comes from stock RadioLib; see its
+  remaining limitations below.
 - Uplinks are unconfirmed. Local transaction success does not establish Helium
   receipt. Inspect the network console. Logs include frame counter, frequency,
   data rate and receive-window result; no downlink correctly reports zero bytes.
@@ -46,7 +46,12 @@ Before an OTAA request can transmit, a verified journal record reserves the next
 16 DevNonce values. The firmware reserves these values before calling the stock
 RadioLib activation API. After a successful request transmission, RadioLib
 advances the in-RAM nonce; reboot skips unused values to the
-stored upper bound. A successful join also saves the latest JoinNonce while
+stored upper bound. If a failed activation leaves the nonce unchanged, the
+firmware uses `setBufferNonces()` to skip to the verified reservation's upper
+bound before any retry. A rejected restore disables joining. The next attempt
+must reserve a new batch; repeated TX timeouts deliberately consume batches of
+16. Successful TX without JoinAccept keeps normal per-request nonce progression.
+A successful join also saves the latest JoinNonce while
 preserving that reservation. The nonce space never wraps. Batching reduces
 flash writes; frequent resets deliberately consume unused reserved values.
 
@@ -100,10 +105,23 @@ rejoins after reboot.
 Invalid API/configuration errors enter a visible paused state. Airtime deferrals
 use RadioLib's time-until-uplink result. Payload/dwell errors retry after a minute;
 other transient send failures back off from five seconds to a five-minute cap.
+Successful activation resets that backoff to five seconds.
 A receive-side error may occur after actual transmission, so such retries can
 produce additional application messages. Lost activation returns to joining.
 No-join-accept retries remain one minute apart. Radio initialization gets three
 attempts. The idle scheduler yields to the RTOS instead of continuously spinning.
+
+Three consecutive `UPLINK_UNAVAILABLE` results with zero reported airtime wait
+enter an application recovery state. A positive airtime wait clears this count.
+The scheduler stops transactions for 60 seconds, allowing abandoned receive
+windows to expire, then recreates its node through the public constructor,
+initializes the radio, and restores the durable nonce reservation and JoinNonce.
+It obtains a fresh OTAA session before sending application data; it never reuses
+the discarded session's frame counters. Recovery initialization gets at most
+three attempts, a minute apart. Persistence failure stops recovery immediately;
+radio initialization failure after the third attempt enters the paused state.
+Flash history is retained throughout. Repeated hardware faults can still prevent
+rejoining; recovery is not proof of RF connectivity.
 
 ## Build and validation
 
@@ -128,8 +146,8 @@ Do not restore dependency patches as part of troubleshooting.
 
 ### Remaining stock RadioLib 7.1.2 limitations
 
-This rollback removes the earlier library changes; it does not resolve the
-underlying cases they addressed:
+Stock RadioLib retains the following behavior. Firmware responses are described
+where implemented:
 
 - `getMaxPayloadLen()` can wrap to a large unsigned value when pending MAC
   commands exceed the frame capacity. The firmware no longer probes capacity
@@ -137,15 +155,16 @@ underlying cases they addressed:
 - Internal absolute timer comparisons are not consistently rollover safe.
   The application's own scheduler uses rollover-safe arithmetic, but that does
   not establish correct library behavior across the roughly 49.7-day wrap.
-- TX or early RX errors can leave a transaction unavailable to later retries.
-  The firmware's existing backoff does not guarantee recovery of that state.
-- A join TX error can return before RadioLib advances DevNonce. Another attempt
-  in the same boot can reuse that nonce even if RF transmission occurred.
-  Durable reservations protect across reboot, not this in-RAM error path.
+- TX or early RX errors can leave the library's transaction unavailable. The
+  firmware detects repeated zero-wait unavailable results and recovers by
+  recreating its node and rejoining, as described above.
+- A join TX error can return before RadioLib advances DevNonce. The firmware
+  detects unchanged nonce state on failed activation and restores the verified
+  reservation bound through the public API before permitting another attempt.
 
-These remain firmware integration work to assess against the supported API.
-The rollback does not claim that error recovery, nonce handling on TX timeout,
-or library timer rollover have been fixed with stock RadioLib.
+The library source remains unchanged. Payload-limit arithmetic and library timer
+rollover remain unresolved integration limitations; these changes address the
+firmware's nonce and recovery policies without changing those implementations.
 
 The board script uses the local environment's Arduino CLI 1.3.1, SparkFun Apollo3
 release 2.2.1 and RadioLib 7.1.2. The core archive internally reports 2.0.0. GCC
@@ -156,7 +175,14 @@ cadence/rollover/retries/eligibility/faults, and independent RTC rate checks.
 Checks for the patched library's payload arithmetic, timer comparisons, error
 cleanup, and nonce consumption were removed with those patches. Retained checks
 exercise firmware scheduling, nonce reservation, the OTAA-only compile guard,
-clock sampling/retries, and flash recovery. A dependency check accepts the stock
+clock sampling/retries, and flash recovery. Integration regressions compile the
+unchanged upstream activation, nonce serialization/restore, eligibility, and
+transmit methods with the firmware wrappers. They cover TX-timeout nonce skipping,
+normal no-JoinAccept progression, restore rejection, exhaustion, failed writes,
+node recreation with JoinNonce retention, and scheduler recovery after a timeout.
+Scheduler checks also cover eight persistent MAC-only transactions and resuming
+text, reset backoff after rejoin, real airtime deferrals, bounded recovery errors,
+and cooldown across timer rollover. A dependency check accepts the stock
 library and rejects edits to the formerly patched files without modifying them.
 Reclamation tests cover bit-level stale-page erase damage with commit words
 intact, repeated interruption/reboot/retry, and every program byte of the

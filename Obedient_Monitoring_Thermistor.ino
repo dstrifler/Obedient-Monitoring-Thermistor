@@ -21,7 +21,11 @@ static const uint32_t JOIN_RETRY_MS = 60000UL;
 static const uint32_t REPORT_RETRY_BACKOFF_MS = 5000UL;
 static uint32_t gReportWaitMs = REPORT_INTERVAL_MS;
 static uint32_t gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
-static uint8_t gMacOnlyAttempts = 0;
+static uint8_t gUnavailableAttempts = 0;
+static uint8_t gRecoveryAttempts = 0;
+static uint32_t gRecoveryStartedMs = 0;
+// Allow any abandoned Class A windows to expire before resetting radio state.
+static const uint32_t RADIO_RECOVERY_COOLDOWN_MS = 60000UL;
 static uint32_t gFaultLogMs = 0;
 static const uint32_t LOOP_SLICE_MS = 50UL;
 
@@ -30,6 +34,7 @@ enum SchedulerState : uint8_t {
   SCHED_WAIT_FOR_REPORT,
   SCHED_SEND_UPLINK,
   SCHED_PROCESS_DOWNLINK,
+  SCHED_RECOVER_RADIO,
   SCHED_FAULT
 };
 
@@ -53,6 +58,15 @@ static void scheduleReportRetry(uint32_t waitMs) {
   // Signed deadline arithmetic requires durations below half the timer range.
   gReportWaitMs = waitMs > 0x7FFFFFFFUL ? 0x7FFFFFFFUL : waitMs;
   gSchedulerState = SCHED_WAIT_FOR_REPORT;
+}
+
+static void scheduleRadioRecovery() {
+  Serial.println(F("[LoRaWAN] No uplink progress; cooling down before radio recovery."));
+  gLoRaJoined = false;
+  gPendingDownlinkLen = 0;
+  gRecoveryAttempts = 0;
+  gRecoveryStartedMs = millis();
+  gSchedulerState = SCHED_RECOVER_RADIO;
 }
 
 static bool permanentLoRaError(int16_t state) {
@@ -97,7 +111,8 @@ static bool ensureJoined() {
   gLoRaJoined = gLoRaJoined && lwIsActivated();
 
   if(gLoRaJoined) {
-    gMacOnlyAttempts = 0;
+    gUnavailableAttempts = 0;
+    gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
     gReportWaitMs = REPORT_INTERVAL_MS;
     gLastReportMs = millis() - REPORT_INTERVAL_MS;
     Serial.println(F("[LoRaWAN] Join successful."));
@@ -214,14 +229,14 @@ void loop() {
 
     case SCHED_SEND_UPLINK: {
       uint32_t waitMs = lwTimeUntilUplink();
-      if(waitMs > 0) { scheduleReportRetry(waitMs); return; }
+      if(waitMs > 0) {
+        gUnavailableAttempts = 0;
+        scheduleReportRetry(waitMs);
+        return;
+      }
       const size_t payloadLen = sizeof(HELLO_WORLD_PAYLOAD) - 1;
       size_t maxPayloadBytes = lwMaxPayloadBytes();
       bool macOnly = payloadLen > maxPayloadBytes;
-      if(macOnly && gMacOnlyAttempts >= 3) {
-        appFault(F("Payload still unavailable after three MAC-only transactions."));
-        return;
-      }
       Serial.println(macOnly ? F("[Payload] MAC-only transaction; text remains pending.") :
         F("[Payload] TEXT: Hello World (11 bytes)"));
       gPendingDownlinkLen = 0;
@@ -253,11 +268,18 @@ void loop() {
 
         if(state == RADIOLIB_ERR_UPLINK_UNAVAILABLE) {
           waitMs = lwTimeUntilUplink();
+          if(waitMs == 0) {
+            if(++gUnavailableAttempts >= 3) { scheduleRadioRecovery(); return; }
+          } else {
+            gUnavailableAttempts = 0;  // An actual airtime deferral, not stuck state.
+          }
           scheduleReportRetry(waitMs > REPORT_RETRY_BACKOFF_MS ? waitMs : REPORT_RETRY_BACKOFF_MS);
         } else if(state == RADIOLIB_ERR_PACKET_TOO_LONG || state == RADIOLIB_ERR_DWELL_TIME_EXCEEDED) {
+          gUnavailableAttempts = 0;
           // Re-evaluate the live limit next time; do not force a radio reset.
           scheduleReportRetry(REPORT_INTERVAL_MS);
         } else {
+          gUnavailableAttempts = 0;
           // A receive-side failure can follow an actual transmission. Avoid
           // generating a new frame every five seconds during a lasting fault.
           scheduleReportRetry(gRetryBackoffMs);
@@ -270,15 +292,11 @@ void loop() {
       Serial.println(state);
       Serial.println(F("[LoRaWAN] Network receipt requires console verification."));
       gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
-      if(macOnly) {
-        ++gMacOnlyAttempts;  // Only completed transactions consume this budget.
-        gLastReportMs = millis();
-        gReportWaitMs = REPORT_RETRY_BACKOFF_MS;
-      } else {
-        gMacOnlyAttempts = 0;
-        gLastReportMs = now;
-        gReportWaitMs = REPORT_INTERVAL_MS;
-      }
+      gUnavailableAttempts = 0;
+      // Persistent MAC responses may need multiple successful transactions.
+      // Keep the text pending and use the normal cadence for maintenance too.
+      gLastReportMs = now;
+      gReportWaitMs = REPORT_INTERVAL_MS;
       gSchedulerState = SCHED_PROCESS_DOWNLINK;
       break;
     }
@@ -294,6 +312,20 @@ void loop() {
 
       gSchedulerState = SCHED_WAIT_FOR_REPORT;
       break;
+
+    case SCHED_RECOVER_RADIO:
+      if(now - gRecoveryStartedMs < RADIO_RECOVERY_COOLDOWN_MS) { return; }
+      if(lwRecover()) {
+        gUnavailableAttempts = 0;
+        gLastJoinAttemptMs = millis() - JOIN_RETRY_MS;
+        gSchedulerState = SCHED_WAIT_FOR_JOIN;
+        Serial.println(F("[LoRaWAN] Radio recovered; fresh OTAA join pending."));
+      } else if(!lwPersistenceHealthy() || ++gRecoveryAttempts >= 3) {
+        appFault(F("Radio recovery failed; resolve the logged radio/persistence error."));
+      } else {
+        gRecoveryStartedMs = millis();  // Bound recovery initialization attempts.
+      }
+      return;
 
     case SCHED_FAULT:
       if(now - gFaultLogMs >= 30000UL) {

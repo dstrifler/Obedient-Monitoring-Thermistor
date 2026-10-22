@@ -10,6 +10,7 @@
 #include "config.h"
 #include "clock_service.h"
 #include "eeprom_service.h"
+#include "nonce_store.h"
 
 static SX1262 gRadio = new Module(
   LORA_PIN_CS,
@@ -20,13 +21,27 @@ static SX1262 gRadio = new Module(
 );
 
 static LoRaWANBand_t gRegion = LORA_BAND;
-static LoRaWANNode gNode(&gRadio, &gRegion, LORA_SUB_BAND);
-static uint8_t gCurrentDataRate = 0;
-
-#ifndef LORA_DEFAULT_DATA_RATE
-#define LORA_DEFAULT_DATA_RATE 0
-#endif
-
+// Pin the serialization contract used for pre-transmit nonce reservations.
+static_assert(RADIOLIB_LORAWAN_NONCES_VERSION_VAL == 1, "Review nonce reservation for this RadioLib version");
+class PersistentLoRaWANNode : public LoRaWANNode {
+public:
+  using LoRaWANNode::LoRaWANNode;
+  uint16_t nextDevNonce() const { return devNonce; }
+  void reservedNonces(uint8_t* out, uint16_t highWater) {
+    memcpy(out, getBufferNonces(), RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+    hton<uint16_t>(&out[RADIOLIB_LORAWAN_NONCES_DEV_NONCE], highWater);
+    hton<uint16_t>(&out[RADIOLIB_LORAWAN_NONCES_SIGNATURE],
+      checkSum16(out, RADIOLIB_LORAWAN_NONCES_BUF_SIZE - 2));
+  }
+};
+static PersistentLoRaWANNode gNode(&gRadio, &gRegion, LORA_SUB_BAND);
+static uint16_t gReservedNonceLimit = 0;
+static bool gPersistenceHealthy = true;
+static const int16_t LW_ERR_PERSISTENCE = -32000;
+static const int16_t LW_ERR_NONCE_EXHAUSTED = -31999;
+static int16_t gLastActivationState = RADIOLIB_ERR_NONE;
+static int16_t lwLastActivationState() { return gLastActivationState; }
+static bool lwPersistenceHealthy() { return gPersistenceHealthy; }
 // ============================================================
 // LORAWAN KEYS
 // ============================================================
@@ -70,68 +85,11 @@ static const int16_t LW_ERR_INVALID_ARGUMENT = RADIOLIB_ERR_INVALID_PARAM;
 static const int16_t LW_ERR_INVALID_ARGUMENT = (int16_t)(INT16_MIN + 42);
 #endif
 
-static void lwInvalidatePersistedNonces(bool wipeNonces) {
-  if(wipeNonces) {
-    memset(gLWnonces, 0, sizeof(gLWnonces));
-    EEPROM.put(EEPROM_LORAWAN_NONCES_ADDR, gLWnonces);
-  }
-
-  EEPROM.write(EEPROM_LORAWAN_FLAG_ADDR, 0x00);
-}
-
-template <typename T>
-static auto lwReadNodeDataRateImpl(T& node, int) -> decltype(node.getDataRate(), int16_t()) {
-  return node.getDataRate();
-}
-
-template <typename T>
-static auto lwReadNodeDataRateImpl(T& node, long) -> decltype(node.getDatarate(), int16_t()) {
-  return node.getDatarate();
-}
-
-template <typename T>
-static int16_t lwReadNodeDataRateImpl(T&, ...) {
-  return RADIOLIB_ERR_UNSUPPORTED;
-}
-
-static int16_t lwReadNodeDataRate() {
-  return lwReadNodeDataRateImpl(gNode, 0);
-}
-
-static void lwRefreshCurrentDataRate(const LoRaWANEvent_t* eventMeta, const __FlashStringHelper* reason) {
-  bool refreshed = false;
-  uint8_t newDataRate = gCurrentDataRate;
-
-  int16_t nodeDataRate = lwReadNodeDataRate();
-  if((nodeDataRate >= 0) && (nodeDataRate <= 15)) {
-    newDataRate = (uint8_t)nodeDataRate;
-    refreshed = true;
-  } else if((eventMeta != nullptr) && (eventMeta->datarate <= 15)) {
-    newDataRate = eventMeta->datarate;
-    refreshed = true;
-  }
-
-  if(!refreshed) {
-    return;
-  }
-
-  gCurrentDataRate = newDataRate;
-
-  Serial.print(F("[LoRaWAN] DR sync "));
-  Serial.print(reason);
-  Serial.print(F(": DR"));
-  Serial.print(gCurrentDataRate);
-  Serial.print(F(", maxPayload="));
-  Serial.println(lwMaxPayloadBytes());
-}
-
 // ============================================================
 // LORAWAN INIT
 // ============================================================
 
 bool lwBegin() {
-  gCurrentDataRate = LORA_DEFAULT_DATA_RATE;
-
   if((LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)) {
     Serial.println(F("[LoRaWAN] Invalid uplink FPort. Must be 1..223."));
     return false;
@@ -194,46 +152,56 @@ bool lwIsActivated() {
 // RESTORE PERSISTED LORAWAN NONCES
 // ============================================================
 
-int16_t lwRestore() {
-  int16_t state = RADIOLIB_ERR_UNKNOWN;
-
-  if(EEPROM.read(EEPROM_LORAWAN_FLAG_ADDR) == EEPROM_LORAWAN_FLAG_VALUE) {
-    gRadio.standby();
-    EEPROM.get(EEPROM_LORAWAN_NONCES_ADDR, gLWnonces);
-    state = gNode.setBufferNonces(gLWnonces);
-    bool nonceBufferLoaded = (state == RADIOLIB_ERR_NONE);
-
-    if(nonceBufferLoaded) {
-      Serial.println(F("[LoRaWAN] Nonce buffer load accepted (RADIOLIB_ERR_NONE)."));
-    } else {
-      lwInvalidatePersistedNonces(true);
-      Serial.print(F("[LoRaWAN] Nonce buffer load failed (error state "));
-      Serial.print(state);
-      Serial.println(F("). Invalidated persisted nonces; a fresh session will be created."));
-    }
-
-    Serial.print(F("[LoRaWAN] Nonce restore state: "));
-    Serial.println(state);
-  } else {
-    Serial.println(F("[LoRaWAN] No persisted nonces found."));
+static bool lwSaveNonces() {
+  // Persist the reserved upper bound, never the lower in-RAM next nonce.
+  gNode.reservedNonces(gLWnonces, gReservedNonceLimit);
+  gPersistenceHealthy = nonceStoreSave(gLWnonces);
+  if(!gPersistenceHealthy) {
+    Serial.println(F("[Persistence] Write/verify failed. Joining disabled."));
   }
-
-  return state;
+  return gPersistenceHealthy;
 }
 
-// ============================================================
-// SAVE CURRENT NONCES TO EEPROM
-// ============================================================
-
-static void lwSaveNonces() {
-  uint8_t* persist = gNode.getBufferNonces();
-  if(persist == nullptr) {
-    return;
+int16_t lwRestore() {
+  gPersistenceHealthy = nonceStoreBegin();
+  if(!gPersistenceHealthy) { return LW_ERR_PERSISTENCE; }
+  bool haveNonces = gNonceStoreHasRecord;
+  if(haveNonces) {
+    memcpy(gLWnonces, gNonceSaved, sizeof(gLWnonces));
+  } else {
+    // The compatibility EEPROM convenience methods discard read errors.
+    // Use its underlying block device when migrating old records.
+    uint8_t legacy[EEPROM_LORAWAN_NONCES_BYTES + 1];
+    if(EEPROM.FlashIAPBlockDevice::read(legacy, 0, sizeof(legacy)) != 0) {
+      gPersistenceHealthy = false;
+      return LW_ERR_PERSISTENCE;
+    }
+    if(legacy[EEPROM_LORAWAN_FLAG_ADDR] == EEPROM_LORAWAN_FLAG_VALUE) {
+      memcpy(gLWnonces, legacy, sizeof(gLWnonces));
+      haveNonces = true;
+      Serial.println(F("[Persistence] Migrating legacy nonce history; prior unsaved attempts cannot be recovered."));
+    } else {
+      for(size_t i = 0; i < sizeof(legacy); ++i) {
+        if(legacy[i] != 0xFF) {
+          Serial.println(F("[Persistence] Unrecognized legacy data; explicit recovery required."));
+          gPersistenceHealthy = false;
+          return LW_ERR_PERSISTENCE;
+        }
+      }
+    }
   }
-
-  memcpy(gLWnonces, persist, RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
-  EEPROM.put(EEPROM_LORAWAN_NONCES_ADDR, gLWnonces);
-  EEPROM.write(EEPROM_LORAWAN_FLAG_ADDR, EEPROM_LORAWAN_FLAG_VALUE);
+  if(haveNonces) {
+    int16_t state = gNode.setBufferNonces(gLWnonces);
+    if(state != RADIOLIB_ERR_NONE) {
+      Serial.println(F("[Persistence] Nonce restore rejected; history retained. No automatic reset."));
+      gPersistenceHealthy = false;
+      return state;
+    }
+  }
+  gReservedNonceLimit = gNode.nextDevNonce();
+  if(haveNonces && !gNonceStoreHasRecord && !lwSaveNonces()) { return LW_ERR_PERSISTENCE; }
+  Serial.println(F("[Persistence] Nonce history ready; a fresh OTAA session will be joined."));
+  return RADIOLIB_ERR_NONE;
 }
 
 // ============================================================
@@ -248,24 +216,37 @@ bool lwActivate() {
   clockLogTimestamp(F("OTAA/ABP activation begin"));
 
 #if (LORA_USE_OTAA == 1)
+  if(!gPersistenceHealthy) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
+  uint16_t next = gNode.nextDevNonce();
+  if(next == UINT16_MAX) {
+    Serial.println(F("[Persistence] DevNonce exhausted; explicit reprovisioning required."));
+    gLastActivationState = LW_ERR_NONCE_EXHAUSTED;
+    return false;
+  }
+  if(next >= gReservedNonceLimit) {
+    // Reserve in batches to reduce wear. A reboot skips unused values.
+    uint32_t limit = static_cast<uint32_t>(next) + 16;
+    gReservedNonceLimit = limit > UINT16_MAX ? UINT16_MAX : limit;
+    if(!lwSaveNonces()) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
+  }
   state = gNode.activateOTAA();
 #else
   state = gNode.activateABP();
 #endif
+
+  gLastActivationState = state;
 
   // RadioLib owns the Join Request TX and RX1/RX2 scheduling. These boundary
   // timestamps bracket that unmodified blocking transaction for bench logs.
   clockLogTimestamp(F("OTAA/ABP activation complete"));
 
   if(state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
-    lwRefreshCurrentDataRate(nullptr, F("(session-restored)"));
     Serial.println(F("[LoRaWAN] Session restored!"));
     return true;
   }
 
   if(state == RADIOLIB_LORAWAN_NEW_SESSION) {
-    lwSaveNonces();
-    lwRefreshCurrentDataRate(nullptr, F("(new-session)"));
+    if(!lwSaveNonces()) { gLastActivationState = LW_ERR_PERSISTENCE; return false; }
     Serial.println(F("[LoRaWAN] Successfully started new session!"));
     return true;
   }
@@ -288,23 +269,18 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
     return LW_ERR_INVALID_ARGUMENT;
   }
 
-  LoRaWANEvent_t eventUp;
-  LoRaWANEvent_t eventDown;
+  *lenDown = 0;
+  LoRaWANEvent_t eventUp = {};
+  LoRaWANEvent_t eventDown = {};
 
-  uint8_t* up = (uint8_t*)dataUp;
-
-  lwRefreshCurrentDataRate(nullptr, F("(pre-send)"));
-  Serial.print(F("[LoRaWAN] Uplink preflight: DR"));
-  Serial.print(gCurrentDataRate);
-  Serial.print(F(", maxPayload="));
+  Serial.print(F("[LoRaWAN] Uplink preflight: maxPayload="));
   Serial.print(lwMaxPayloadBytes());
-  Serial.print(F(", len="));
-  Serial.println(lenUp);
+  Serial.print(F(", len=")); Serial.println(lenUp);
 
   clockLogTimestamp(F("uplink transaction begin"));
 
   int16_t state = gNode.sendReceive(
-    up,
+    dataUp,
     lenUp,
     LORA_UPLINK_FPORT,
     dataDown,
@@ -319,78 +295,18 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   clockLogTimestamp(F("uplink transaction complete"));
 
   if(state >= RADIOLIB_ERR_NONE) {
-    lwRefreshCurrentDataRate(&eventUp, F("(post-uplink)"));
+    Serial.print(F("[LoRaWAN] TX frame=")); Serial.print(eventUp.fCnt);
+    Serial.print(F(", MHz=")); Serial.print(eventUp.freq);
+    Serial.print(F(", DR=")); Serial.print(eventUp.datarate);
+    Serial.print(F(", receive window=")); Serial.println(state);
   }
 
+  if(state <= 0) { *lenDown = 0; }
   return state;
 }
 
-// ============================================================
-// REGION / DATA-RATE PAYLOAD LIMIT HELPERS
-// ============================================================
-//
-// Returns the maximum FRMPayload bytes available to the application at a
-// given data-rate for this firmware's region build. Values are conservative
-// and include room for LoRaWAN MAC/FOpts overhead in typical Class A uplinks.
-// Unknown regions/data-rates fail closed to 0 so caller can safely drop/fallback.
-
-uint8_t lwGetCurrentDataRate() {
-  return gCurrentDataRate;
-}
-
-void lwSetCurrentDataRate(uint8_t dataRate) {
-  gCurrentDataRate = dataRate;
-}
-
-size_t lwMaxPayloadBytesFor(LoRaWANBand_t region, uint8_t dataRate) {
-  (void)region;
-#if (LORA_BAND == US915) || (LORA_BAND == AU915)
-  switch(dataRate) {
-    case 0:  return 11;
-    case 1:  return 53;
-    case 2:  return 125;
-    case 3:  return 242;
-    case 4:  return 242;
-    case 8:  return 53;
-    case 9:  return 129;
-    case 10: return 242;
-    case 11: return 242;
-    case 12: return 242;
-    case 13: return 242;
-    default: return 0;
-  }
-#elif (LORA_BAND == EU868) || (LORA_BAND == IN865) || (LORA_BAND == RU864)
-  switch(dataRate) {
-    case 0:
-    case 1:
-    case 2:  return 51;
-    case 3:  return 115;
-    case 4:
-    case 5:
-    case 6:
-    case 7:  return 222;
-    default: return 0;
-  }
-#elif (LORA_BAND == AS923) || (LORA_BAND == KR920)
-  switch(dataRate) {
-    case 0:
-    case 1:
-    case 2:  return 51;
-    case 3:  return 115;
-    case 4:
-    case 5:
-    case 6:
-    case 7:  return 222;
-    default: return 0;
-  }
-#else
-  return 0;
-#endif
-}
-
-size_t lwMaxPayloadBytes() {
-  uint8_t activeDataRate = (gCurrentDataRate <= 15) ? gCurrentDataRate : LORA_DEFAULT_DATA_RATE;
-  return lwMaxPayloadBytesFor(gRegion, activeDataRate);
-}
+// RadioLib owns region, data-rate, pending FOpts and dwell-time calculations.
+size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
+static uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
 
 #endif

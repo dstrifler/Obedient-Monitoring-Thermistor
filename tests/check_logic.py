@@ -879,3 +879,26 @@ int main() {
  assert(gSchedulerState==SCHED_FAULT && gRadio.uplinkCalls==rfBefore);
 }
 ''')
+
+run('stock_payload_capacity_boundary_units', capacity_integration + r'''
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;assert(lwActivate());
+ gNode.fOptsUpLen=15;
+ // These synthetic N-values straddle the bound discussed in PR #47.
+ // They use the unchanged upstream setter, capacity and validation methods.
+ for(uint8_t regionalN=25;regionalN<=39;++regionalN) {
+  gRegion.payloadLenMax[1]=regionalN;uint16_t tried=0;
+  bool selected=lwTryCapacityDataRate(11,tried);
+  assert(selected==(regionalN>=26));
+  if(selected) {
+   assert(gNode.channels[0].dr==1 && gNode.getMaxPayloadLen()==regionalN-15);
+   uint8_t total=11+15;assert(gNode.isValidUplink(&total,1)==RADIOLIB_ERR_NONE);
+  }
+ }
+ gRegion.payloadLenMax[1]=26;uint16_t tried=0;
+ assert(lwTryCapacityDataRate(11,tried) && gNode.getMaxPayloadLen()==11);
+ uint8_t tooLong=12+15;
+ assert(gNode.isValidUplink(&tooLong,1)==RADIOLIB_ERR_PACKET_TOO_LONG);
+ assert(gNode.fOptsUpLen==15); // The firmware never alters the pending queue.
+}
+''')

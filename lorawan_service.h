@@ -346,8 +346,9 @@ static bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates) {
     uint16_t bit = static_cast<uint16_t>(1U << dr);
     if(triedRates & bit) { continue; }
     triedRates |= bit;
-    // Seek room for the fixed text and even a full FOpts queue. Skip unused
-    // entries; setDatarate() checks the enabled channel plan and radio support.
+    // payloadLenMax is the regional application N-value, already excluding the
+    // fixed frame overhead. Add only FOpts here; adding 13 again double-counts
+    // overhead. setDatarate() checks the enabled channel plan and radio support.
     if(gRegion.dataRates[dr] == RADIOLIB_LORAWAN_DATA_RATE_UNUSED ||
        gRegion.payloadLenMax[dr] < requiredBytes + RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN) { continue; }
     int16_t state = gNode.setDatarate(dr);

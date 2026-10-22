@@ -134,7 +134,10 @@ rejoining; recovery is not proof of RF connectivity.
 After three consecutive payload-size or dwell-time rejections, the firmware
 tries a data-rate candidate through public `setDatarate()`. Candidates must have
 regional payload capacity for the fixed text plus the maximum 15-byte FOpts
-queue; the library verifies the enabled channel plan and radio support. A
+queue; the library verifies the enabled channel plan and radio support. The
+regional `payloadLenMax` is the application N-value and already excludes fixed
+frame overhead. The full-queue bound is therefore `text bytes + 15`, without an
+additional 13 bytes. RadioLib adds and subtracts those 13 bytes internally. A
 candidate's reported live capacity must fit the text and stay within its
 regional maximum. Each rate is considered at most once until a successful
 transaction or new join resets the candidate mask. Retry remains one minute

@@ -12,8 +12,11 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   application packets are scheduled 60 seconds apart, subject to radio/network
   eligibility and transaction overhead.
 - Empty application transactions can carry pending MAC commands when the live
-  payload limit cannot fit the text. Three unsuccessful clearance attempts stop
-  application work with a diagnostic rather than loop forever.
+  payload limit cannot fit the text. Three completed clearance transactions
+  that still cannot make room stop
+  application work with a diagnostic. Radio failures do not consume this budget;
+  a new session resets it. If the MAC commands themselves exceed the current
+  frame capacity, pause immediately with a data-rate/network diagnostic.
 - Uplinks are unconfirmed. Local transaction success does not establish Helium
   receipt. Inspect the network console. Logs include frame counter, frequency,
   data rate and receive-window result; no downlink correctly reports zero bytes.
@@ -38,8 +41,12 @@ preserving that reservation. The nonce space never wraps. Batching reduces
 flash writes; frequent resets deliberately consume unused reserved values.
 
 Two 8-KiB pages at `0xFA000` and `0xFC000` hold append-only 64-byte records with
-CRC, sequence number and a commit word written last. Page rollover erases only
-the page that does not contain the latest committed record. Flash operation
+CRC, sequence number and a commit word written last. Recovery retains the
+highest complete CRC-valid reservation even if its commit marker is damaged or
+unfinished. It never rolls back past that reservation. Any nonempty record with
+an incomplete or invalid body stops joining, even if an older valid record
+exists; this deliberately favors nonce safety over automatic recovery. Page
+rollover erases only the page that does not contain the latest retained reservation. Flash operation
 results and committed records are checked. There is no flash write per uplink.
 The legacy EEPROM page at `0xFE000`, including saved application settings, stays
 untouched. Valid legacy nonce records migrate with checked reads. Historical
@@ -50,13 +57,14 @@ limit. A runtime image-boundary check also stops writes if the image overlaps
 storage. Other build systems must reserve these same pages. Preserve these
 pages during flashing: chip erase or overwriting them destroys nonce history.
 
-Invalid credentials/history, corrupt committed records, initialization errors,
+Invalid credentials/history, ambiguous record bodies, initialization errors,
 and write/readback failures stop joining. The firmware never silently clears
 history. Collect the exact error and reconcile the device's network provisioning
 before any explicit storage recovery. Resetting the board alone will not repair
 invalid records; do not erase storage and reuse the same credentials as a casual
 troubleshooting step. Full session restoration and durable ABP frame counters
-are not implemented; this test uses OTAA and rejoins after reboot.
+are not implemented; ABP is rejected at compile time. This test uses OTAA and
+rejoins after reboot.
 
 ## Error handling
 
@@ -75,12 +83,24 @@ python3 tests/check_logic.py
 bash tools/check-board.sh
 ```
 
+The board script prepares an isolated patched copy of RadioLib 7.1.2. It checks
+library version and the upstream protocol source SHA-256 before making changes;
+the installed upstream library is untouched. The patches saturate payload-limit
+subtraction at zero and fix rollover comparisons in eligibility, transmission,
+join scheduling and receive-window checks. The firmware rejects unpatched builds.
+Use this script for board builds; an ordinary IDE build must also use the
+prepared library and reserved flash layout. The patch implementation is in
+`tools/prepare_radiolib.py`. The host checks need the pristine 7.1.2 library too;
+set `RADIOLIB_UPSTREAM` to its directory if it is not in the default environment.
+
 The board script uses the local environment's Arduino CLI 1.3.1, SparkFun Apollo3
 release 2.2.1 and RadioLib 7.1.2. The core archive internally reports 2.0.0. GCC
 7-2017q4 is an explicit fallback because SparkFun's prescribed GCC 8 archive
 returns HTTP 403. Tests cover journal interruptions/rollover/corruption, durable
 nonce reservation before TX, nonce exhaustion, absent/real downlinks, scheduler
 cadence/rollover/retries/eligibility/faults, and independent RTC rate checks.
+Regression checks compile actual patched RadioLib payload and transmission/
+eligibility methods, including timer rollover, and test the ABP compile guard.
 These host fakes do not validate physical flash behavior, crystal accuracy or RF.
 
 ## Bench check

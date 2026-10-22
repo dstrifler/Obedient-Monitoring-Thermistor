@@ -41,38 +41,42 @@ static uint32_t nonceCrc(const uint8_t* data, size_t len) {
   return ~crc;
 }
 
-static bool nonceRecordValid(const NonceRecord& r) {
-  return r.magic == NONCE_MAGIC && r.committed == NONCE_COMMITTED &&
+static bool nonceRecordBodyValid(const NonceRecord& r) {
+  return r.magic == NONCE_MAGIC &&
     r.crc == nonceCrc(reinterpret_cast<const uint8_t*>(&r), offsetof(NonceRecord, crc));
+}
+
+static bool nonceRecordValid(const NonceRecord& r) {
+  return nonceRecordBodyValid(r) && r.committed == NONCE_COMMITTED;
 }
 
 static bool nonceStoreScan() {
   gNonceLatestOffset = -1;
   gNonceSequence = 0;
   gNonceStoreHasRecord = false;
-  bool dirty = false;
   for(uint32_t offset = 0; offset < 2 * NONCE_PAGE_BYTES; offset += NONCE_RECORD_BYTES) {
     NonceRecord record;
     if(gNonceFlash.read(&record, offset, sizeof(record)) != 0) { return false; }
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&record);
-    for(size_t i = 0; i < sizeof(record); ++i) { dirty |= bytes[i] != 0xFF; }
-    if(record.committed == NONCE_COMMITTED && !nonceRecordValid(record)) {
-      Serial.println(F("[Persistence] Corrupt committed record; refusing nonce rollback."));
+    bool erased = true;
+    for(size_t i = 0; i < sizeof(record); ++i) { erased &= bytes[i] == 0xFF; }
+    if(erased) { continue; }
+    // A complete CRC-protected body is a conservative reservation even if
+    // its final commit was interrupted or damaged. Never roll back past it.
+    // An incomplete/damaged body is ambiguous: stop rather than guess.
+    if(!nonceRecordBodyValid(record)) {
+      Serial.println(F("[Persistence] Ambiguous journal record; refusing nonce rollback."));
       return false;
     }
-    if(nonceRecordValid(record) &&
-       (!gNonceStoreHasRecord || static_cast<int32_t>(record.sequence - gNonceSequence) > 0)) {
+    if(record.committed != NONCE_COMMITTED) {
+      Serial.println(F("[Persistence] Retaining CRC-valid reservation with an incomplete/damaged commit marker."));
+    }
+    if(!gNonceStoreHasRecord || static_cast<int32_t>(record.sequence - gNonceSequence) > 0) {
       gNonceSequence = record.sequence;
       gNonceLatestOffset = offset;
       memcpy(gNonceSaved, record.nonces, sizeof(gNonceSaved));
       gNonceStoreHasRecord = true;
     }
-  }
-  // A partially written very first reservation never authorized TX, but require
-  // explicit recovery rather than assuming damaged flash is a new device.
-  if(dirty && !gNonceStoreHasRecord) {
-    Serial.println(F("[Persistence] Damaged journal; explicit recovery required. No join attempted."));
-    return false;
   }
   return true;
 }

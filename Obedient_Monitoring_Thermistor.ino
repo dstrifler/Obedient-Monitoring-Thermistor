@@ -97,6 +97,7 @@ static bool ensureJoined() {
   gLoRaJoined = gLoRaJoined && lwIsActivated();
 
   if(gLoRaJoined) {
+    gMacOnlyAttempts = 0;
     gReportWaitMs = REPORT_INTERVAL_MS;
     gLastReportMs = millis() - REPORT_INTERVAL_MS;
     Serial.println(F("[LoRaWAN] Join successful."));
@@ -213,7 +214,11 @@ void loop() {
       const size_t payloadLen = sizeof(HELLO_WORLD_PAYLOAD) - 1;
       size_t maxPayloadBytes = lwMaxPayloadBytes();
       bool macOnly = payloadLen > maxPayloadBytes;
-      if(macOnly && ++gMacOnlyAttempts > 3) {
+      if(macOnly && !lwMacCommandsFit()) {
+        appFault(F("Pending MAC commands exceed this data rate's frame capacity. Reconfigure data rate/network."));
+        return;
+      }
+      if(macOnly && gMacOnlyAttempts >= 3) {
         appFault(F("Payload still unavailable after three MAC-only transactions."));
         return;
       }
@@ -266,6 +271,7 @@ void loop() {
       Serial.println(F("[LoRaWAN] Network receipt requires console verification."));
       gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
       if(macOnly) {
+        ++gMacOnlyAttempts;  // Only completed transactions consume this budget.
         gLastReportMs = millis();
         gReportWaitMs = REPORT_RETRY_BACKOFF_MS;
       } else {

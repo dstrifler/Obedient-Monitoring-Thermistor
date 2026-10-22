@@ -75,6 +75,15 @@
 #define SENSOR_I2C_ADDR        0x77
 #define SENSOR_FORCED_DELAY_MS 250
 
+// ============================================================
+// APOLLO3 CLOCK CALIBRATION
+// ============================================================
+
+// Ambiq requires the 32.768 kHz crystal to stabilize before it is selected as
+// the HFADJ timing reference. Keep RadioLib and Arduino on the core-provided
+// HFRC / 16 STIMER; clock_service verifies that source without reconfiguring it.
+#define CLOCK_XTAL_STABILIZATION_MS 2000UL
+
 // how often to send an uplink by default
 static constexpr uint32_t DEFAULT_UPLINK_INTERVAL_SECONDS = 15UL * 60UL;
 

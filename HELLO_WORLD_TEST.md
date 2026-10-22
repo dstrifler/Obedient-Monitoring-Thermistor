@@ -15,8 +15,8 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   payload limit cannot fit the text. Three completed clearance transactions
   that still cannot make room stop
   application work with a diagnostic. Radio failures do not consume this budget;
-  a new session resets it. If the MAC commands themselves exceed the current
-  frame capacity, pause immediately with a data-rate/network diagnostic.
+  a new session resets it. Payload eligibility comes from stock RadioLib; see
+  its remaining limitations below.
 - Uplinks are unconfirmed. Local transaction success does not establish Helium
   receipt. Inspect the network console. Logs include frame counter, frequency,
   data rate and receive-window result; no downlink correctly reports zero bytes.
@@ -43,11 +43,9 @@ rate pauses radio work with a diagnostic.
 ## Nonce persistence and recovery
 
 Before an OTAA request can transmit, a verified journal record reserves the next
-16 DevNonce values. RadioLib consumes the composed DevNonce before starting a
-possibly transmitting
-operation, so even a TX timeout consumes it; a missing completion IRQ is not
-proof that the packet stayed off-air. Failed requests consume in-RAM values;
-reboot skips to the
+16 DevNonce values. The firmware reserves these values before calling the stock
+RadioLib activation API. After a successful request transmission, RadioLib
+advances the in-RAM nonce; reboot skips unused values to the
 stored upper bound. A successful join also saves the latest JoinNonce while
 preserving that reservation. The nonce space never wraps. Batching reduces
 flash writes; frequent resets deliberately consume unused reserved values.
@@ -102,11 +100,6 @@ rejoins after reboot.
 Invalid API/configuration errors enter a visible paused state. Airtime deferrals
 use RadioLib's time-until-uplink result. Payload/dwell errors retry after a minute;
 other transient send failures back off from five seconds to a five-minute cap.
-On TX or early RX failure, RadioLib waits through the configured RX2 delay plus
-a conservative two-second recovery guard, puts the radio in standby, and closes
-the abandoned receive-window state before returning the original error. The
-next retry can reach the radio instead of looping on UPLINK_UNAVAILABLE.
-Duty-cycle timing remains anchored to the attempted transmission.
 A receive-side error may occur after actual transmission, so such retries can
 produce additional application messages. Lost activation returns to joining.
 No-join-accept retries remain one minute apart. Radio initialization gets three
@@ -119,17 +112,40 @@ python3 tests/check_logic.py
 bash tools/check-board.sh
 ```
 
-The board script prepares an isolated patched copy of RadioLib 7.1.2. It checks
-library version and the upstream protocol source SHA-256 before making changes;
-the installed upstream library is untouched. The patches saturate payload-limit
-subtraction at zero and fix rollover comparisons in eligibility, transmission,
-join scheduling and receive-window checks, plus error-path receive-window cleanup
-and pre-transmission DevNonce consumption. Protocol-fix marker version 2 is
-required so a previously prepared library copy cannot silently omit these fixes. The firmware rejects unpatched builds.
-Use this script for board builds; an ordinary IDE build must also use the
-prepared library and reserved flash layout. The patch implementation is in
-`tools/prepare_radiolib.py`. The host checks need the pristine 7.1.2 library too;
-set `RADIOLIB_UPSTREAM` to its directory if it is not in the default environment.
+The board script selects the installed, unmodified RadioLib 7.1.2 directly.
+`tools/verify_radiolib.py` checks its version and the SHA-256 of the two files
+previously modified (`RadioLib.h` and `LoRaWAN.cpp`), without writing dependency
+files. The patch generator and requirement for a patched-library marker have
+been removed. Old generated copies under `patched-libraries` are not selected.
+An ordinary IDE build can use stock RadioLib, but must still reserve the flash
+layout described above. Set `RADIOLIB_UPSTREAM` for host checks if the library is
+outside the default environment.
+
+Dependency policy: keep third-party library source unmodified. Changes belong
+in this firmware and its use of the library API. Report upstream limitations
+explicitly before choosing a firmware response or a supported upstream upgrade.
+Do not restore dependency patches as part of troubleshooting.
+
+### Remaining stock RadioLib 7.1.2 limitations
+
+This rollback removes the earlier library changes; it does not resolve the
+underlying cases they addressed:
+
+- `getMaxPayloadLen()` can wrap to a large unsigned value when pending MAC
+  commands exceed the frame capacity. The firmware no longer probes capacity
+  by temporarily changing the node's pending-command state.
+- Internal absolute timer comparisons are not consistently rollover safe.
+  The application's own scheduler uses rollover-safe arithmetic, but that does
+  not establish correct library behavior across the roughly 49.7-day wrap.
+- TX or early RX errors can leave a transaction unavailable to later retries.
+  The firmware's existing backoff does not guarantee recovery of that state.
+- A join TX error can return before RadioLib advances DevNonce. Another attempt
+  in the same boot can reuse that nonce even if RF transmission occurred.
+  Durable reservations protect across reboot, not this in-RAM error path.
+
+These remain firmware integration work to assess against the supported API.
+The rollback does not claim that error recovery, nonce handling on TX timeout,
+or library timer rollover have been fixed with stock RadioLib.
 
 The board script uses the local environment's Arduino CLI 1.3.1, SparkFun Apollo3
 release 2.2.1 and RadioLib 7.1.2. The core archive internally reports 2.0.0. GCC
@@ -137,12 +153,11 @@ release 2.2.1 and RadioLib 7.1.2. The core archive internally reports 2.0.0. GCC
 returns HTTP 403. Tests cover journal interruptions/rollover/corruption, durable
 nonce reservation before TX, nonce exhaustion, absent/real downlinks, scheduler
 cadence/rollover/retries/eligibility/faults, and independent RTC rate checks.
-Regression checks compile actual patched RadioLib payload and transmission/
-eligibility methods, including timer rollover, and test the ABP compile guard.
-Additional checks exercise the complete patched sendReceive path after TX/RX
-errors, timed-out joins with distinct nonces, successful join derivation using
-the transmitted nonce, temporary RTC read errors, delayed samples, and bounded
-failure on a persistently invalid or stopped clock.
+Checks for the patched library's payload arithmetic, timer comparisons, error
+cleanup, and nonce consumption were removed with those patches. Retained checks
+exercise firmware scheduling, nonce reservation, the OTAA-only compile guard,
+clock sampling/retries, and flash recovery. A dependency check accepts the stock
+library and rejects edits to the formerly patched files without modifying them.
 Reclamation tests cover bit-level stale-page erase damage with commit words
 intact, repeated interruption/reboot/retry, and every program byte of the
 intent/snapshot/activation/new-reservation sequence.

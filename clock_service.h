@@ -51,6 +51,44 @@ static bool clockCheckConfiguration() {
          stimerUsesHfrcDiv16;
 }
 
+// RTC runs from XTAL; STIMER and Arduino millis run from HFRC. This is an
+// independent reference comparison, unlike comparing millis with STIMER.
+static bool clockReadRtcHundredths(uint32_t* value) {
+  am_hal_rtc_time_t time = {};
+  if(am_hal_rtc_time_get(&time) != 0 || time.ui32ReadError ||
+     time.ui32Minute > 59 || time.ui32Second > 59 || time.ui32Hundredths > 99) { return false; }
+  *value = (time.ui32Minute * 60 + time.ui32Second) * 100 + time.ui32Hundredths;
+  return true;
+}
+
+static bool clockVerifyRate() {
+  am_hal_rtc_osc_enable();
+  uint32_t startRtc;
+  if(!clockReadRtcHundredths(&startRtc)) { return false; }
+  uint32_t startTicks = am_hal_stimer_counter_get();
+  // A 20-second window limits RTC's 10-ms endpoint quantization error.
+  // 2000 ppm is a coarse startup sanity limit, not RF timing certification.
+  for(uint32_t polls = 0; polls < 30000; ++polls) {
+    delay(1);
+    uint32_t rtc;
+    if(!clockReadRtcHundredths(&rtc)) { return false; }
+    uint32_t ticks = am_hal_stimer_counter_get();
+    uint32_t hundredths = (rtc + 360000UL - startRtc) % 360000UL;
+    if(hundredths >= 2000) {
+      if(hundredths > 2100) { return false; }
+      uint32_t elapsedTicks = ticks - startTicks;
+      uint32_t expected = hundredths * 30000UL;
+      int64_t error = static_cast<int64_t>(elapsedTicks) - expected;
+      int32_t ppm = static_cast<int32_t>(error * 1000000LL / expected);
+      Serial.print(F("[Clock] STIMER vs XTAL RTC error (ppm, coarse): "));
+      Serial.println(ppm);
+      return ppm >= -2000 && ppm <= 2000;
+    }
+  }
+  Serial.println(F("[Clock] RTC did not advance within the bounded check."));
+  return false;
+}
+
 bool clockBegin() {
   Serial.println(F("[Clock] Starting 32.768 kHz crystal ..."));
 
@@ -97,7 +135,10 @@ bool clockBegin() {
     return false;
   }
 
-  bool configured = clockCheckConfiguration();
+  // One-second HFADJ warmup plus four complete four-second correction cycles.
+  // This settling margin is followed by measurement, not assumed convergence.
+  delay(17000);
+  bool configured = clockCheckConfiguration() && clockVerifyRate() && clockCheckConfiguration();
   Serial.println(configured
     ? F("[Clock] Crystal-calibrated system timing ready.")
     : F("[Clock] Configuration verification failed."));

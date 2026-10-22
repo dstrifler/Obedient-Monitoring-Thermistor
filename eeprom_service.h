@@ -45,16 +45,19 @@
 #define SETTINGS_MAGIC                0x47534150UL   // "GSAP"
 #define SETTINGS_VERSION              2
 
-static inline void eepromBootstrap()
+static inline bool eepromBootstrap()
 {
   static bool isInitialized = false;
   if(isInitialized) {
-    return;
+    return true;
   }
 
-  EEPROM.init();
+  if(EEPROM.init() != 0) {
+    return false;
+  }
   EEPROM.setLength(EEPROM_TOTAL_BYTES);
   isInitialized = true;
+  return true;
 }
 
 #endif

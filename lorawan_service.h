@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "clock_service.h"
 #include "eeprom_service.h"
 
 static SX1262 gRadio = new Module(
@@ -244,12 +245,17 @@ bool lwActivate() {
 
   Serial.println(F("[LoRaWAN] Attempting network join ..."));
   gRadio.standby();
+  clockLogTimestamp(F("OTAA/ABP activation begin"));
 
 #if (LORA_USE_OTAA == 1)
   state = gNode.activateOTAA();
 #else
   state = gNode.activateABP();
 #endif
+
+  // RadioLib owns the Join Request TX and RX1/RX2 scheduling. These boundary
+  // timestamps bracket that unmodified blocking transaction for bench logs.
+  clockLogTimestamp(F("OTAA/ABP activation complete"));
 
   if(state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
     lwRefreshCurrentDataRate(nullptr, F("(session-restored)"));
@@ -295,6 +301,8 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   Serial.print(F(", len="));
   Serial.println(lenUp);
 
+  clockLogTimestamp(F("uplink transaction begin"));
+
   int16_t state = gNode.sendReceive(
     up,
     lenUp,
@@ -305,6 +313,10 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
     &eventUp,
     &eventDown
   );
+
+  // sendReceive includes TX completion and both Class A receive windows;
+  // RadioLib remains solely responsible for their timing.
+  clockLogTimestamp(F("uplink transaction complete"));
 
   if(state >= RADIOLIB_ERR_NONE) {
     lwRefreshCurrentDataRate(&eventUp, F("(post-uplink)"));

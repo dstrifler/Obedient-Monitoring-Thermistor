@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "config.h"
+#include "clock_service.h"
 #include "eeprom_service.h"
 #include "settings_service.h"
 #include "sensor_service.h"
@@ -264,6 +265,16 @@ void setup() {
 
   Serial.println();
   Serial.println(F("Garage Sensor Starting..."));
+
+  // Calibrate the Apollo3 HFRC before initializing the SX1262 or RadioLib.
+  // Abort startup if timing cannot be verified: unreliable timing can miss
+  // the tightly scheduled LoRaWAN receive windows.
+  if(!clockBegin()) {
+    Serial.println(F("[Clock] Fatal timing initialization failure."));
+    while(true) {
+      delay(1000);
+    }
+  }
 
   eepromBootstrap();
   settingsBegin();

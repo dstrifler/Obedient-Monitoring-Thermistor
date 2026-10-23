@@ -137,7 +137,11 @@ bool lwBegin() {
     return false;
   }
 
-  LOG_INFO("LoRaWAN", "Radio and OTAA node initialized.");
+  // Application reports use US915 DR1 (SF9/BW125). Join rates remain under
+  // RadioLib's regional rules. Reapply DR1 before each normal transaction:
+  // stock RadioLib can process a server LinkADRReq even with ADR disabled.
+  gNode.setADR(false);
+  LOG_INFO("LoRaWAN", "Radio and OTAA node initialized; normal uplinks use DR1.");
   return true;
 }
 
@@ -292,6 +296,11 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
 
   if(millis() < started || lwTimerRolloverPending()) { return LW_ERR_TIMER_ROLLOVER; }
 
+  if(gNode.isActivated()) {
+    const int16_t rateState = gNode.setDatarate(1);
+    if(rateState != RADIOLIB_ERR_NONE) { return rateState; }
+  }
+
   int16_t state = gNode.sendReceive(
     dataUp,
     lenUp,
@@ -317,30 +326,32 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
 }
 
 // RadioLib owns region, data-rate, pending FOpts and dwell-time calculations.
-size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }
+size_t lwMaxPayloadBytes() {
+  if(!gNode.isActivated() || gNode.setDatarate(1) != RADIOLIB_ERR_NONE) { return 0; }
+  return gNode.getMaxPayloadLen();
+}
 uint32_t lwTimeUntilUplink() { return gNode.timeUntilUplink(); }
 
 bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates) {
-  static_assert(RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES <= 16, "Capacity retry mask needs updating");
-  for(uint8_t dr = 0; dr < RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES; ++dr) {
-    uint16_t bit = static_cast<uint16_t>(1U << dr);
-    if(triedRates & bit) { continue; }
-    triedRates |= bit;
-    // payloadLenMax is the regional application N-value, already excluding the
-    // fixed frame overhead. Add only FOpts here; adding 13 again double-counts
-    // overhead. setDatarate() checks the enabled channel plan and radio support.
-    if(gRegion.dataRates[dr] == RADIOLIB_LORAWAN_DATA_RATE_UNUSED ||
-       gRegion.payloadLenMax[dr] < requiredBytes + RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN) { continue; }
-    int16_t state = gNode.setDatarate(dr);
-    if(state != RADIOLIB_ERR_NONE) {
-      LOG_DEBUG("Payload", "Data-rate candidate rejected: code=%d", int(state));
-      continue;
-    }
-    size_t available = gNode.getMaxPayloadLen();
-    if(available >= requiredBytes && available <= gRegion.payloadLenMax[dr]) {
-      LOG_WARN("Payload", "Retrying at permitted data rate=%u", unsigned(dr));
-      return true;
-    }
+  static_assert(RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES > 1 && RADIOLIB_LORAWAN_CHANNEL_NUM_DATARATES <= 16,
+                "Capacity retry mask needs updating");
+  const uint8_t dr = 1;
+  const uint16_t bit = 1U << dr;
+  if(triedRates & bit) { return false; }
+  triedRates |= bit;
+  // Keep DR1 fixed. Regional N excludes fixed framing; reserve only FOpts.
+  if(gRegion.dataRates[dr] == RADIOLIB_LORAWAN_DATA_RATE_UNUSED ||
+     requiredBytes > gRegion.payloadLenMax[dr] ||
+     gRegion.payloadLenMax[dr] - requiredBytes < RADIOLIB_LORAWAN_FHDR_FOPTS_MAX_LEN) { return false; }
+  const int16_t state = gNode.setDatarate(dr);
+  if(state != RADIOLIB_ERR_NONE) {
+    LOG_DEBUG("Payload", "DR1 rejected: code=%d", int(state));
+    return false;
+  }
+  const size_t available = gNode.getMaxPayloadLen();
+  if(available >= requiredBytes && available <= gRegion.payloadLenMax[dr]) {
+    LOG_WARN("Payload", "Retrying at fixed DR1.");
+    return true;
   }
   return false;
 }

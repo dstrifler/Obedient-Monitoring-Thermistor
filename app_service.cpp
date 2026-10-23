@@ -226,7 +226,7 @@ void appSetup() {
     appFault("EEPROM initialization failed.");
     return;
   }
-  LOG_INFO("Test", "11-byte sensor reports start 60 seconds after join, then repeat every 60 seconds.");
+  LOG_INFO("Test", "24-byte sensor/BSEC reports start 60 seconds after join, then repeat every 60 seconds.");
   sensorStart();
 
   bool radioReady = false;
@@ -323,11 +323,11 @@ void appLoop() {
     case SCHED_SEND_UPLINK: {
       uint32_t waitMs = lwTimeUntilUplink();
       if(deferForAirtime(waitMs)) { return; }
-      uint8_t payload[ENVIRONMENT_PACKET_SIZE];
-      SensorData sample = {};
-      const bool haveSample = sensorLatest(&sample);
-      const size_t payloadLen = payloadEncodeEnvironment(payload, sizeof(payload), haveSample ? &sample : nullptr);
-      if(payloadLen != ENVIRONMENT_PACKET_SIZE) {
+      uint8_t payload[ENVIRONMENT_REPORT_SIZE];
+      SensorSnapshot sample = {};
+      const bool haveSample = sensorLatestSnapshot(&sample);
+      const size_t payloadLen = payloadEncodeReport(payload, sizeof(payload), haveSample ? &sample : nullptr);
+      if(payloadLen != ENVIRONMENT_REPORT_SIZE) {
         appFault("Environmental packet encoding failed.");
         return;
       }
@@ -336,7 +336,7 @@ void appLoop() {
       if(macOnly) { LOG_INFO("Payload", "MAC-only transaction; sensor report remains pending."); }
       else {
         if(!haveSample) { LOG_WARN("Payload", "No fresh sensor sample; sending unavailable flags."); }
-        LOG_DEBUG("Payload", "Environmental report: 11 bytes, valid=0x%X.", unsigned(payload[0] & 0x0F));
+        LOG_DEBUG("Payload", "Environmental/BSEC report: 24 bytes, valid=0x%X.", unsigned(payload[0] & 0x0F));
         LOG_TRACE_HEX("Payload", payload, payloadLen);
       }
       gPendingDownlinkLen = 0;

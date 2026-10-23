@@ -20,6 +20,11 @@ case "${THERMISTOR_SENSOR_ENABLED:-1}" in
   *) echo "THERMISTOR_SENSOR_ENABLED must be 0 or 1" >&2; exit 2 ;;
 esac
 EXTRA_CXX_FLAGS+=" -DSENSOR_SERVICE_ENABLED=$SENSOR_ENABLED"
+case "${THERMISTOR_BSEC_ENABLED:-1}" in
+  0|1) BSEC_ENABLED="${THERMISTOR_BSEC_ENABLED:-1}" ;;
+  *) echo "THERMISTOR_BSEC_ENABLED must be 0 or 1" >&2; exit 2 ;;
+esac
+EXTRA_CXX_FLAGS+=" -DSENSOR_BSEC_ENABLED=$BSEC_ENABLED"
 if [[ "$SENSOR_ENABLED" == 1 ]]; then
   BME68X_DIR="${BME68X_UPSTREAM:-$TOOLS_DIR/user/libraries/BME68x}"
   if [[ ! -f "$BME68X_DIR/library.properties" ]] ||
@@ -28,6 +33,15 @@ if [[ "$SENSOR_ENABLED" == 1 ]]; then
     exit 2
   fi
   LIBRARY_FLAGS+=(--library "$BME68X_DIR")
+  if [[ "$BSEC_ENABLED" == 1 ]]; then
+    BSEC_DIR="${BSEC_UPSTREAM:-$TOOLS_DIR/user/libraries/bsec2}"
+    python3 "$REPO_DIR/tools/verify_bsec.py" "$BSEC_DIR"
+    LIBRARY_FLAGS+=(--library "$BSEC_DIR")
+    # The Apollo3 core's stock linker recipe omits Arduino's precompiled-library
+    # placeholder. Supply Bosch's unmodified hard-float archive through the
+    # supported build property; no core or third-party files are edited.
+    FW_BUILD_FLAGS+=(--build-property "compiler.ld.extra_flags=$BSEC_DIR/src/cortex-m4/fpv4-sp-d16-hard/libalgobsec.a")
+  fi
 fi
 # Preserve this core's dependency-generation flag when overriding extras.
 FW_BUILD_FLAGS+=(--build-property "compiler.cxx.extra_flags=$EXTRA_CXX_FLAGS")

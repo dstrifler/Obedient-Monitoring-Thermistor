@@ -119,14 +119,14 @@ bool lwBegin(){return true;}bool lwIsActivated(){return active;}
 int16_t lwRestore(){return 0;}bool lwRecover(){active=false;return true;}
 bool lwActivate(){++joins;active=true;return true;}
 int16_t lwLastActivationState(){return 0;}bool lwPersistenceHealthy(){return true;}
-size_t lwMaxPayloadBytes(){return 11;}uint32_t lwTimeUntilUplink(){return 0;}
+size_t lwMaxPayloadBytes(){return 53;}uint32_t lwTimeUntilUplink(){return 0;}
 bool lwTryCapacityDataRate(size_t,uint16_t&){return false;}
 int16_t lwSendReceive(const uint8_t* data,size_t size,uint8_t*,size_t* received){
- const uint8_t unavailable[]={0x10,0,0,0,0,0,0,0,0,0,0};
- assert(active && size==11 && memcmp(data,unavailable,11)==0);*received=0;sends.push_back(fakeMs);return sendResult;
+ const uint8_t unavailable[24]={0x20};
+ assert(active && size==24 && memcmp(data,unavailable,24)==0);*received=0;sends.push_back(fakeMs);return sendResult;
 }
 '''
-HEADERS = ['app_service.h', 'clock_service.h', 'eeprom_service.h', 'firmware_features.h',
+HEADERS = ['app_service.h', 'bsec_service.h', 'bsec_state.h', 'clock_service.h', 'eeprom_service.h', 'firmware_features.h',
            'log_config.h', 'log_service.h', 'lorawan_service.h', 'lorawan_timer.h',
            'nonce_store.h', 'payload_service.h', 'sensor_service.h', 'settings_service.h']
 INCLUDES = ''.join('#include "' + name + '"\n' for name in HEADERS) * 2
@@ -239,7 +239,7 @@ with tempfile.TemporaryDirectory(prefix='thermistor-modules-') as tmp:
                         '-x', 'c++', '-fsyntax-only', '-'],
                        input=('#include "' + name + '"\n') * 2, text=True, check=True)
     print('PASS: independent public headers and repeated inclusion', flush=True)
-    sources = ['app_service.cpp', 'clock_service.cpp', 'eeprom_service.cpp', 'lorawan_timer.cpp',
+    sources = ['app_service.cpp', 'bsec_service.cpp', 'bsec_state.cpp', 'clock_service.cpp', 'eeprom_service.cpp', 'lorawan_timer.cpp',
                'nonce_store.cpp', 'payload_service.cpp', 'sensor_service.cpp', 'settings_service.cpp',
                'log_service.cpp', 'sketch.cpp', 'backends.cpp', 'other.cpp', 'main.cpp']
     compile_program(folder, sources, 'modules', ['-DSENSOR_SERVICE_ENABLED=0'])

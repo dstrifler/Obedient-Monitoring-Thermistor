@@ -158,6 +158,7 @@ static bool permanentLoRaError(int16_t state) {
     case RADIOLIB_ERR_INVALID_FREQUENCY:
     case LW_ERR_PERSISTENCE:
     case LW_ERR_NONCE_EXHAUSTED:
+    case LW_ERR_RADIO_GPIO:
       return true;
     default: return false;
   }

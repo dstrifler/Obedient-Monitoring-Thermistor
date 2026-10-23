@@ -12,13 +12,18 @@
 #include "nonce_store.h"
 #include "lorawan_timer.h"
 #include "log_service.h"
+#include "radio_hal.h"
 
+static_assert(LW_ERR_RADIO_GPIO != LW_ERR_TIMER_ROLLOVER, "Local radio errors must be distinct");
+// NM180100 connects DIO1 to Apollo3 pad 40 (module datasheet table 8).
+static_assert(LORA_PIN_IRQ_DIO1 == D40, "NM180100 DIO1 must use Apollo3 D40");
+static Apollo3RadioHal gRadioHal(LORA_SPI_BUS, LORA_PIN_IRQ_DIO1, 40);
 static SX1262 gRadio = new Module(
+  &gRadioHal,
   LORA_PIN_CS,
   LORA_PIN_IRQ_DIO1,
   LORA_PIN_RST,
-  LORA_PIN_BUSY,
-  LORA_SPI_BUS
+  LORA_PIN_BUSY
 );
 
 static LoRaWANBand_t gRegion = LORA_BAND;
@@ -75,6 +80,12 @@ static uint8_t gLWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
 // LORAWAN INIT
 // ============================================================
 
+static bool lwRadioHalHealthy() {
+  if(gRadioHal.status() == 0) { return true; }
+  LOG_ERROR("RadioGPIO", "DIO1 configuration failed: status=%lu", static_cast<unsigned long>(gRadioHal.status()));
+  return false;
+}
+
 bool lwBegin() {
   if((LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)) {
     LOG_ERROR("LoRaWAN", "Invalid uplink FPort. Must be 1..223.");
@@ -92,6 +103,7 @@ bool lwBegin() {
   // the default 1.6 V TCXO control on DIO3.
   gRadio.XTAL = true;
   int16_t radioState = gRadio.begin();
+  if(!lwRadioHalHealthy()) { return false; }
   if(radioState != RADIOLIB_ERR_NONE) {
     LOG_WARN("LoRaWAN", "Radio initialization failed: code=%d", int(radioState));
     return false;
@@ -186,6 +198,7 @@ bool lwActivate() {
   int16_t state = RADIOLIB_ERR_NETWORK_NOT_JOINED;
   const uint32_t started = millis();
 
+  if(!lwRadioHalHealthy()) { gLastActivationState = LW_ERR_RADIO_GPIO; return false; }
   if(lwTimerRolloverPending()) { gLastActivationState = LW_ERR_TIMER_ROLLOVER; return false; }
 
   LOG_INFO("LoRaWAN", "Attempting network join ...");
@@ -217,7 +230,15 @@ bool lwActivate() {
 #endif
 
   gLastActivationState = state;
-
+  if(!lwRadioHalHealthy()) {
+    // Retain an accepted JoinNonce even if GPIO cleanup failed afterward.
+    if(state == RADIOLIB_LORAWAN_NEW_SESSION && !lwSaveNonces()) {
+      gLastActivationState = LW_ERR_PERSISTENCE;
+      return false;
+    }
+    gLastActivationState = LW_ERR_RADIO_GPIO;
+    return false;
+  }
 
   if(state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
     LOG_INFO("LoRaWAN", "Session restored!");
@@ -264,6 +285,7 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   }
 
   *lenDown = 0;
+  if(!lwRadioHalHealthy()) { return LW_ERR_RADIO_GPIO; }
   const uint32_t started = millis();
   LoRaWANEvent_t eventUp = {};
   LoRaWANEvent_t eventDown = {};
@@ -282,6 +304,7 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   );
 
   // sendReceive owns TX completion and both Class A receive windows.
+  if(!lwRadioHalHealthy()) { *lenDown = 0; return LW_ERR_RADIO_GPIO; }
 
   if(state >= RADIOLIB_ERR_NONE) {
     LOG_DEBUG("LoRaWAN", "TX frame=%lu freq_kHz=%lu DR=%u receive_window=%d",

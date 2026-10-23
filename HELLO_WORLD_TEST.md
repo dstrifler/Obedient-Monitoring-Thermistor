@@ -10,6 +10,21 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   documented public `XTAL` flag before every radio initialization, including
   recovery. This suppresses the default 1.6 V TCXO control on DIO3. This radio
   oscillator configuration is separate from Apollo3 system-clock calibration.
+- DIO1 GPIO handling: `radio_hal.h/.cpp` supplies a firmware-owned
+  `Apollo3RadioHal` through RadioLib's public `Module(RadioLibHal*, ...)`
+  constructor. Apollo3's `INTDIR_NONE` setting forces GPIO reads to zero, so
+  clearing a receive callback can otherwise make a later blocking transmit
+  miss DIO1's completion level and return `-5`, despite RF transmission.
+  The adapter restores a complete readable input configuration on pad 40 at
+  initialization and after interrupt detachment, masks/clears its IRQ while
+  detached, and explicitly re-enables the IRQ after registering the next
+  receive callback. Only DIO1 gets this handling. SPI1 configuration, timeouts,
+  oscillator selection, RF switching and the default 10-ms scan guard retain
+  their stock behavior. RadioLib and the Arduino core are unchanged.
+  GPIO setup errors latch until radio initialization; join/data wrappers report
+  the local error `-31997` and stop transactions instead of repeatedly retrying
+  a known GPIO configuration failure. An accepted JoinNonce is still saved if
+  a GPIO cleanup failure follows successful activation.
 - FPort: `LORA_UPLINK_FPORT` (currently 1).
 - Payload: exactly 11 ASCII bytes, `Hello World`, without a trailing NUL.
 - Expected hex: `48656c6c6f20576f726c64`.
@@ -51,6 +66,7 @@ interface; implementations and mutable module state live in its `.cpp` file.
 | `eeprom_service.h/.cpp` | Settings layout, reserved old nonce area and shared EEPROM bootstrap |
 | `lorawan_service.h/.cpp` | Radio, node, credentials, join and transaction wrappers |
 | `lorawan_timer.h/.cpp` | Transaction rollover guard |
+| `radio_hal.h/.cpp` | Apollo3 DIO1 polling input and receive-interrupt lifecycle |
 | `nonce_store.h/.cpp` | Flash journal and checked copies of retained nonce history |
 | `log_service.h/.cpp` | Shared serial queue and output service |
 | `settings_service.h/.cpp` | Retained settings schema, validation and persistence |
@@ -390,6 +406,19 @@ behavior. A separate opt-in sensor build checks the retained backend against a
 fake BME library; it does not establish correct wiring or real sensor operation.
 Host checks use a staged, non-secret configuration. `MODULE_SANITIZERS=1` adds
 address/undefined-behavior instrumentation to the module-link checks.
+
+`python3 tests/check_radio_hal.py` checks the firmware HAL against stock
+RadioLib's actual HAL interfaces/implementation and SX126x transmit and callback
+methods. It executes the Apollo3 core's GPIO interrupt configuration functions
+against simulated registers. A negative control reproduces `-5` after receive
+interrupt detachment despite simulated RF delivery; the adapter then completes
+100 TX/RX/detach cycles with repeated initialization, verifies working receive
+callbacks, detached IRQ masking, unrelated pins, SPI1/timing delegation and
+latched GPIO failures. These checks require the installed RadioLib and Apollo3
+core used by the board build (`RADIOLIB_UPSTREAM` and `APOLLO3_CORE` can override
+their paths). They do not replace a physical-board test: after flashing, verify
+multiple consecutive Hello World uplinks with increasing frame counters and
+receive-window processing, without the recurring timeout/rejoin cycle.
 
 ## Bench check
 

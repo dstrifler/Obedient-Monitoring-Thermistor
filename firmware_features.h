@@ -2,10 +2,10 @@
 #define FIRMWARE_FEATURES_H
 
 
-// The radio beta does not acquire sensor readings. Keep the retained I2C
-// backend out of the build until sensor development resumes.
+// BME688 bench readings go to Serial; radio payloads remain Hello World.
+// Set to 0 for a radio-only build without the Bosch sensor dependency.
 #ifndef SENSOR_SERVICE_ENABLED
-#define SENSOR_SERVICE_ENABLED 0
+#define SENSOR_SERVICE_ENABLED 1
 #endif
 static_assert(SENSOR_SERVICE_ENABLED == 0 || SENSOR_SERVICE_ENABLED == 1,
               "SENSOR_SERVICE_ENABLED must be 0 or 1");

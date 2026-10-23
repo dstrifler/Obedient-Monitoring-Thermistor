@@ -56,6 +56,8 @@ uint32_t ticks=0;
 uint32_t millis() { return ticks; }
 uint32_t micros() { return ticks*1000; }
 void delay(uint32_t ms) { ticks += ms; }
+void sensorStart() {}
+void sensorPoll() {}
 '''
 for name in ['log_config.h', 'log_service.h', 'log_service.cpp']:
     COMMON += re.sub(r'^#include .*\n', '', (ROOT / name).read_text(), flags=re.M)

@@ -1,7 +1,6 @@
 #include "lorawan_service.h"
 #include <Arduino.h>
 #include <RadioLib.h>
-#include <EEPROM.h>
 #include <limits.h>
 #include <string.h>
 
@@ -10,7 +9,6 @@
 #if !defined(LORA_USE_OTAA) || (LORA_USE_OTAA != 1)
 #error "OTAA required: ABP needs durable session and frame-counter storage."
 #endif
-#include "eeprom_service.h"
 #include "nonce_store.h"
 #include "lorawan_timer.h"
 #include "log_service.h"
@@ -99,8 +97,6 @@ bool lwBegin() {
     return false;
   }
 
-  // EEPROM must already be initialized by app bootstrap (eepromBootstrap()).
-
   // Many SX126x boards (including LoRa Thing Plus variants) route
   // the RF front-end switch to DIO2. If this is not enabled, TX can
   // appear to work in logs while no RF packet is actually radiated.
@@ -154,30 +150,7 @@ static bool lwSaveNonces() {
 int16_t lwRestore() {
   gPersistenceHealthy = nonceStoreBegin();
   if(!gPersistenceHealthy) { return LW_ERR_PERSISTENCE; }
-  const bool journalHasRecord = nonceStoreLoad(gLWnonces, sizeof(gLWnonces));
-  bool haveNonces = journalHasRecord;
-  if(!haveNonces) {
-    // The compatibility EEPROM convenience methods discard read errors.
-    // Use its underlying block device when migrating old records.
-    uint8_t legacy[EEPROM_LORAWAN_NONCES_BYTES + 1];
-    if(EEPROM.FlashIAPBlockDevice::read(legacy, 0, sizeof(legacy)) != 0) {
-      gPersistenceHealthy = false;
-      return LW_ERR_PERSISTENCE;
-    }
-    if(legacy[EEPROM_LORAWAN_FLAG_ADDR] == EEPROM_LORAWAN_FLAG_VALUE) {
-      memcpy(gLWnonces, legacy, sizeof(gLWnonces));
-      haveNonces = true;
-      LOG_WARN("Persistence", "Migrating legacy nonce history; prior unsaved attempts cannot be recovered.");
-    } else {
-      for(size_t i = 0; i < sizeof(legacy); ++i) {
-        if(legacy[i] != 0xFF) {
-          LOG_ERROR("Persistence", "Unrecognized legacy data; explicit recovery required.");
-          gPersistenceHealthy = false;
-          return LW_ERR_PERSISTENCE;
-        }
-      }
-    }
-  }
+  const bool haveNonces = nonceStoreLoad(gLWnonces, sizeof(gLWnonces));
   if(haveNonces) {
     int16_t state = gNode.setBufferNonces(gLWnonces);
     if(state != RADIOLIB_ERR_NONE) {
@@ -185,9 +158,12 @@ int16_t lwRestore() {
       gPersistenceHealthy = false;
       return state;
     }
+  } else {
+    // The journal is the only nonce source. Legacy EEPROM is deliberately
+    // ignored; lwActivate() must persist a reservation before any join TX.
+    LOG_WARN("Persistence", "Nonce journal empty; starting fresh. Legacy EEPROM ignored; prior network nonces may conflict.");
   }
   gReservedNonceLimit = gNode.nextDevNonce();
-  if(haveNonces && !journalHasRecord && !lwSaveNonces()) { return LW_ERR_PERSISTENCE; }
   LOG_INFO("Persistence", "Nonce history ready; a fresh OTAA session will be joined.");
   return RADIOLIB_ERR_NONE;
 }

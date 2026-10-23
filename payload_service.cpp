@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <limits>
 
 #include "sensor_service.h"
 #include "settings_service.h"
@@ -102,6 +103,38 @@ size_t payloadEncodeEnvironment(uint8_t* buffer, size_t maxLen, const SensorData
     buffer[0] |= 0x08;
   }
   return ENVIRONMENT_PACKET_SIZE;
+}
+
+size_t payloadEncodeReport(uint8_t* buffer, size_t maxLen, const SensorSnapshot* data) {
+  if(buffer == nullptr || maxLen < ENVIRONMENT_REPORT_SIZE) { return 0; }
+  static_assert(sizeof(float) == sizeof(uint32_t), "Report requires binary32 float");
+  static_assert(std::numeric_limits<float>::is_iec559, "Report requires IEEE-754 float");
+  memset(buffer, 0, ENVIRONMENT_REPORT_SIZE);
+  payloadEncodeEnvironment(buffer, maxLen, data ? &data->environment : nullptr);
+  buffer[0] = 0x20 | (buffer[0] & 0x0F);
+  if(data == nullptr) { return ENVIRONMENT_REPORT_SIZE; }
+  const AirQualityData& air = data->airQuality;
+  if((air.validMask & 1) && air.iaqAccuracy <= 3 && isfinite(air.iaq) && air.iaq >= 0 && air.iaq <= 500) {
+    payloadWriteU16BE(buffer + 11, uint16_t(lroundf(air.iaq * 10.0f)));
+    buffer[19] |= 0x10;
+  }
+  if((air.validMask & 2) && isfinite(air.co2EquivalentPpm) &&
+     air.co2EquivalentPpm >= 0 && air.co2EquivalentPpm <= 65535) {
+    payloadWriteU16BE(buffer + 13, uint16_t(lroundf(air.co2EquivalentPpm)));
+    buffer[19] |= 0x20;
+  }
+  if((air.validMask & 4) && isfinite(air.breathVocEquivalentPpm) && air.breathVocEquivalentPpm >= 0) {
+    uint32_t bits;
+    memcpy(&bits, &air.breathVocEquivalentPpm, sizeof(bits));
+    payloadWriteU32BE(buffer + 15, bits);
+    buffer[19] |= 0x40;
+  }
+  if(air.iaqAccuracy <= 3) { buffer[19] |= air.iaqAccuracy; }
+  if(air.stabilized) { buffer[19] |= 0x04; }
+  if(air.runIn) { buffer[19] |= 0x08; }
+  if(data->temperatureHumidityCompensated) { buffer[19] |= 0x80; }
+  payloadWriteU32BE(buffer + 20, data->sampleUptimeSeconds);
+  return ENVIRONMENT_REPORT_SIZE;
 }
 
 // ============================================================

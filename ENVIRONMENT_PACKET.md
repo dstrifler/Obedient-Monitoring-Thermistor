@@ -1,100 +1,133 @@
-# Environmental packet v1
+# Environmental packet v2
 
-The current test sends a fixed **11-byte binary application payload on FPort 1**.
-It replaces Hello World. It starts 60 seconds after a successful OTAA activation
-returns, including after radio recovery, then uses the existing one-minute
-cadence and airtime/retry handling. Saved report interval, field selection,
-units, payload-mode settings, and application downlink commands remain bypassed
-while testing. The Helium decoder will be implemented separately from this
-board-side change.
+The firmware sends one **24-byte application packet on FPort 1 every minute**,
+starting 60 seconds after OTAA returns. Normal uplinks use **US915 DR1,
+SF9/BW125**, with ADR disabled on the node. DR1 is reapplied before capacity
+checks/transmission because the stock library can process network rate commands.
+Regional join-request rates remain managed by RadioLib. Keep network ADR disabled.
 
-## Byte layout
+The packet contains temperature, humidity, pressure, raw gas resistance, Bosch
+IAQ, CO2-equivalent and breath-VOC-equivalent. These last two are algorithmic
+estimates, not independent CO2/VOC measurements. IAQ is not outdoor AQI.
 
-All multibyte integers are **big-endian**. Byte positions never change when a
-measurement is invalid; its slot contains zero and its validity bit is cleared.
-Zero alone must not be interpreted as missing: 0 C and 0 %RH are valid readings.
+## Wire layout
 
-| Byte offset | Field | Encoding | Decoder conversion |
+All multibyte fields are **big-endian**. Invalid measurement slots are zero and
+their validity bits are clear; valid zero readings are distinct from unavailable.
+
+| Offset | Bytes | Field | Encoding |
 | --- | --- | --- | --- |
-| 0 | Version and validity | High nibble = 1; low nibble = valid fields | `version = byte0 >> 4` |
-| 1-2 | Temperature | Signed int16, degrees C multiplied by 100 | Divide signed value by 100 |
-| 3-4 | Humidity | Unsigned uint16, %RH multiplied by 100 | Divide by 100 |
-| 5-6 | Pressure | Unsigned uint16, Pa divided by 2, rounded | Multiply by 2 for Pa; divide by 50 for hPa |
-| 7-10 | Gas resistance | Unsigned uint32, ohms | Read as an unsigned 32-bit value |
+| 0 | 1 | Version + environmental validity | High nibble 2; low nibble T/H/P/G |
+| 1–2 | 2 | Temperature | Signed int16, degrees C × 100 |
+| 3–4 | 2 | Humidity | Unsigned uint16, %RH × 100 |
+| 5–6 | 2 | Pressure | Unsigned uint16, Pa / 2, rounded |
+| 7–10 | 4 | Raw gas resistance | Unsigned uint32, ohms |
+| 11–12 | 2 | Bosch IAQ | Unsigned uint16, index × 10; range 0–500 |
+| 13–14 | 2 | CO2-equivalent | Unsigned uint16, whole ppm |
+| 15–18 | 4 | Breath-VOC-equivalent | **IEEE-754 binary32**, ppm, unmodified float bits |
+| 19 | 1 | BSEC status | Packed fields below |
+| 20–23 | 4 | Sample timestamp | Unsigned seconds since boot, not Unix time |
 
-Validity bits in byte 0:
+Byte 0 bits 0–3 indicate valid temperature, humidity, pressure and gas. The first
+11 slots retain v1's layout, but the version nibble is now 2.
 
-- Bit 0 (`0x01`): temperature valid.
-- Bit 1 (`0x02`): humidity valid.
-- Bit 2 (`0x04`): pressure valid.
-- Bit 3 (`0x08`): gas resistance valid.
+Byte 19:
 
-Thus `0x1F` means all four values are valid; `0x17` means temperature, humidity,
-and pressure are valid with gas unavailable; `0x10` means no fresh valid sample.
-Pressure has 2-Pa resolution, a rounding error of at most 1 Pa, and covers the
-BME688's full 30000-110000 Pa measurement range. Temperature and humidity are
-rounded to hundredths. Encoding precision does not imply sensor accuracy.
+- Bits 0–1: IAQ accuracy (0 initializing, 1 low, 2 medium, 3 high).
+- Bit 2: gas sensor stabilized.
+- Bit 3: gas sensor run-in complete.
+- Bits 4, 5, 6: IAQ, CO2-equivalent, VOC-equivalent available, respectively.
+- Bit 7: temperature/humidity are Bosch sensor-heat-compensated outputs.
 
-Gas resistance is raw ohms, not an IAQ score or gas concentration. Its bit is
-set only when acquisition reports both gas-valid and heater-stable flags and
-the resistance is usable. Preserve unsigned interpretation in JavaScript for
-values above `0x7FFFFFFF`.
+Accuracy 0 is **not** the same as missing data. Estimates can be present during
+calibration; applications should check accuracy/readiness before treating them
+as reliable. The accuracy field refers to IAQ. If Bosch does not provide a valid
+compensated T/H pair, raw validated T/H is used and bit 7 is clear. No arbitrary
+board temperature offset is applied.
 
-## Known encoding examples
+Temperature/humidity retain hundredth-unit encoding, pressure 2-Pa resolution,
+IAQ tenths and CO2-equivalent whole ppm. Encoding resolution does not imply
+sensor accuracy. VOC retains its original binary32 precision/range. Invalid,
+negative or nonfinite estimates are not transmitted as valid measurements.
+
+The timestamp belongs to the acquisition, not the transmit attempt. It advances
+through millis rollover in the default BSEC backend. Use network reception time
+with uptime/session identity; uptime alone is not a wall clock. There is no
+historical buffer/backfill in this update.
+
+## Decoder and MQTT
+
+Paste the **entire** [decoders/environment_v1.js](decoders/environment_v1.js)
+into the Helium decoder and save it. Despite its retained filename, it accepts
+both 11-byte v1 and 24-byte v2 packets, preserving old decoded fields. It also
+supports ChirpStack's decodeUplink(input) API. Empty FPort 0 or 1 packets are
+recognized as MAC-only traffic. Malformed input returns an error object rather
+than throwing and disabling subsequent Helium decoding.
+
+The v2 fields added to the existing temperature/humidity/pressure/gas object are:
 
 ```text
-Input: 25.25 C, 50.50 %RH, 100123 Pa, 12345 ohm; all valid
-Hex:   1F 09 DD 13 BA C3 8E 00 00 30 39
-Decode:25.25 C, 50.50 %RH, 100124 Pa, 12345 ohm
-
-Same T/H/P with gas unavailable:
-Hex:   17 09 DD 13 BA C3 8E 00 00 00 00
-
-Sensor absent, failed, or sample stale:
-Hex:   10 00 00 00 00 00 00 00 00 00 00
+iaq
+co2_equivalent_ppm
+breath_voc_equivalent_ppm
+iaq_accuracy
+sensor_stabilized
+sensor_run_in_complete
+air_quality_valid_mask
+temperature_humidity_compensated
+sample_uptime_s
 ```
 
-A decoder should accept FPort 1, require exactly 11 bytes and version 1, decode
-temperature as signed two's complement, and show invalid fields as unavailable.
-These bytes are incompatible with the historical 14-byte settings-dependent
-binary encoder and with Hello World's ASCII bytes. No new checksum, timestamp,
-or sequence counter is included; LoRaWAN and the network supply integrity,
-frame counters, and reception timestamps.
+Unavailable measurements and unavailable IAQ accuracy decode as null. A sample
+with valid VOC equal to zero decodes as zero. No Node.js Buffer or DataView is
+required by the decoder. MQTT integration topics stay unchanged.
 
-## Acquisition and radio behavior
+## Scheduling and storage
 
-The monitor samples independently about once a minute and retains the latest
-validated sample in RAM. Each RF attempt encodes one snapshot. Samples older
-than **65 seconds** are unavailable, providing five seconds of tolerance beyond
-the measurement interval. Age is measured from estimated conversion completion,
-including when collection is delayed by a blocking radio call. Acquisition
-failure invalidates the retained sample. An absent/stale sample produces the
-full-length unavailable packet instead of replaying an old measurement.
+Bosch controls the LP sensor configuration and heater profile at approximately
+three-second intervals. A dedicated Mbed worker services acquisition during
+RadioLib's blocking joins and receive windows. A mutex protects whole snapshots;
+the main thread performs Serial output and calibration persistence. The worker
+does not log, write EEPROM, or operate the radio. Samples older than 10 seconds
+are unavailable; delayed conversions beyond the ready grace are discarded.
 
-The packet size is always 11 bytes at every data rate. Before each transaction,
-firmware checks RadioLib's current available payload capacity. If pending MAC
-commands leave less than 11 bytes, it runs the existing MAC-only transaction
-and retries environmental reporting on the normal cadence. The next report
-uses the latest fresh sample; missed samples are not buffered as a backlog.
-No sensor field is removed to fit a smaller packet. RF failures retain the
-existing retry/recovery policy and can change the actual reporting interval.
+Calibration is saved after high-accuracy, stabilized/run-in output, then at most
+every six hours. It uses a CRC/profile/version-checked record at EEPROM offset
+128, outside the settings block. Bulk writes preserve other EEPROM bytes and
+readback checks verify the record. Missing/corrupt/incompatible state starts
+fresh calibration; save failure retries without stopping radio work. Like the
+existing emulated settings EEPROM, this is best-effort single-page persistence:
+power loss during a page rewrite can lose its contents. Nonce-journal pages are
+independent and are never erased by calibration writes.
 
-## Nominal daily data
+Before each radio transaction, capacity is checked at DR1. Its nominal 53-byte
+application allowance accommodates the 24-byte report plus up to 15 FOpts bytes.
+The existing MAC-only path remains available if capacity is temporarily smaller.
+Missing/stale samples produce a 24-byte unavailable packet. Existing radio
+retry/recovery handling remains active. Saved field/unit/interval settings and
+application downlink commands remain bypassed during testing.
 
-With uninterrupted one-minute sensor reporting, excluding startup, deferrals,
-MAC-only exchanges, and retransmissions:
+**Adaptive reporting and a six-minute learning period are not implemented.**
+Radio reports remain once/minute, including the existing initial 60-second wait.
+At 1440 reports/day this is 34560 application bytes, excluding retransmissions,
+maintenance exchanges and LoRaWAN/radio framing.
 
-- 1440 environmental packets per 24 hours.
-- 15840 application bytes: 15.84 kB, or 15.47 KiB.
-- At least 34560 LoRaWAN frame bytes with minimum 13-byte framing per packet,
-  before additional MAC commands and LoRa radio framing/preamble overhead.
+## Build and verification
 
-## Bench verification
+See [SENSOR_TEST.md](SENSOR_TEST.md) for dependencies, local build instructions,
+wiring and physical testing. Host checks:
 
-Keep the wiring and stock dependencies in [SENSOR_TEST.md](SENSOR_TEST.md).
-After merging/pulling and flashing, inspect raw FPort 1 payloads in Helium:
-expect 11 bytes with a leading `1F`, `17`, or another valid version-1 flag
-combination, rather than ASCII Hello World. Check changing readings against
-Serial at 115200, one-minute cadence, and increasing network frame counters.
-Sensor disconnection/reconnection should clear/recover validity without
-causing a new join. Physical RF receipt still needs the board/network test.
+```sh
+python3 tests/check_bsec.py
+python3 tests/check_bsec_packet.py
+python3 tests/check_decoder.py
+python3 tests/check_sensor.py
+python3 tests/check_logic.py
+python3 tests/check_modules.py
+python3 tests/check_logging.py
+python3 tests/check_radio_hal.py
+```
+
+The BSEC host test simulates the opaque ARM algorithm's public API; actual
+algorithm initialization, calibration and concurrent RF/I2C operation require
+physical-board testing. The guarded board build links the actual stock binary.

@@ -112,7 +112,7 @@ int8_t bme68x_get_data(uint8_t mode,bme68xData* out,uint8_t* count,bme68x_dev*){
 }
 }
 bool active=false;unsigned joins=0;uint32_t joinedAt=0;std::vector<uint32_t> sends;
-size_t capacity=11;bool macTest=false,stopSensor=false;
+size_t capacity=53;bool macTest=false,stopSensor=false;
 std::vector<std::vector<uint8_t>> packets;
 bool clockBegin(){return true;}bool eepromBootstrap(){return true;}
 bool lwBegin(){return true;}bool lwIsActivated(){return active;}
@@ -125,23 +125,23 @@ bool lwActivate(){
 size_t lwMaxPayloadBytes(){return capacity;}uint32_t lwTimeUntilUplink(){return 0;}
 bool lwTryCapacityDataRate(size_t,uint16_t&){return false;}
 int16_t lwSendReceive(const uint8_t* p,size_t n,uint8_t*,size_t* received){
- assert(active && (n==11 || (macTest && n==0)));
+ assert(active && (n==24 || (macTest && n==0)));
  if(n){
-  assert((p[0]>>4)==1);
+  assert((p[0]>>4)==2);
   if(failAt==1 || (stopSensor && sends.size()>=1)){
-   assert(p[0]==0x10);for(size_t i=1;i<n;++i)assert(p[i]==0);
+   assert(p[0]==0x20);for(size_t i=1;i<n;++i)assert(p[i]==0);
   }else{
    assert((p[0]&7)==7);
    int16_t temperature=int16_t((uint16_t(p[1])<<8)|p[2]);
    assert(temperature==lroundf(reading.temperature*100));
    assert(p[3]==0x13 && p[4]==0xba && p[5]==0xc3 && p[6]==0x8e);
-   if(reading.status&BME68X_GASM_VALID_MSK)assert(p[0]==0x1f && p[9]==0x30 && p[10]==0x39);
-   else {assert(p[0]==0x17);for(size_t i=7;i<n;++i)assert(p[i]==0);}
+   if(reading.status&BME68X_GASM_VALID_MSK)assert(p[0]==0x2f && p[9]==0x30 && p[10]==0x39);
+   else {assert(p[0]==0x27);for(size_t i=7;i<20;++i)assert(p[i]==0);}
   }
  }
  assert(uint32_t(ticks-joinedAt)>=60000);sends.push_back(ticks);
  packets.emplace_back(p,p+n);
- if(macTest && sends.size()==2)capacity=11;
+ if(macTest && sends.size()==2)capacity=53;
  if(stopSensor)fields=false;
  inRadio=true;ticks+=2100;inRadio=false;*received=0;return 0;
 }
@@ -205,6 +205,7 @@ int main(int argc,char** argv){
  }else if(test=="rollover_and_logs"){
   ticks=UINT32_MAX-100;reading.temperature=-0.25f;sensorStart();sensorPoll();sensorStart();
   ticks+=151;sensorPoll();drain();assert(fetches==1);
+  SensorSnapshot snapshot{};assert(sensorLatestSnapshot(&snapshot) && snapshot.sampleUptimeSeconds>=4294967);
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
   assert(Serial.output.find("T=-0.25 C")!=std::string::npos);
 #endif
@@ -236,7 +237,7 @@ int main(int argc,char** argv){
   for(size_t i=1;i<sends.size();++i)assert(sends[i]-sends[i-1]>=60000 && sends[i]-sends[i-1]<=60200);
   if(failAt)assert(triggers==0 && initializations>=5 && initializations<=6);
   else if(!stopSensor)assert(fetches>=5 && triggers>=5 && sensorPresent());
-  if(macTest)assert(packets[0].empty() && packets[1].empty() && packets[2].size()==11);
+  if(macTest)assert(packets[0].empty() && packets[1].empty() && packets[2].size()==24);
   if(test=="app_healthy")assert(packets.front()!=packets.back());
  }else assert(false);
 }
@@ -267,7 +268,7 @@ with tempfile.TemporaryDirectory(prefix='thermistor-sensor-') as tmp:
     for level in (0, 3, 5):
         subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
                         '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
-                        '-DARDUINO=10819', '-DFW_LOG_LEVEL=' + str(level),
+                        '-DARDUINO=10819', '-DSENSOR_BSEC_ENABLED=0', '-DFW_LOG_LEVEL=' + str(level),
                         '-I', str(folder), '-I', str(folder / 'bosch'),
                         *[str(folder / name) for name in ['sensor_service.cpp', 'app_service.cpp',
                           'lorawan_timer.cpp', 'log_service.cpp', 'payload_service.cpp', 'bosch/bme68xLibrary.cpp', 'fixture.cpp']],

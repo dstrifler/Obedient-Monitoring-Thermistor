@@ -37,6 +37,7 @@ COMMON = r'''
 #include <cstdarg>
 #include <string>
 #include <math.h>
+#include <limits>
 constexpr int16_t LW_ERR_RADIO_GPIO=-31997;
 bool radioHalHealthy=true;
 bool lwRadioHalHealthy(){return radioHalHealthy;}
@@ -74,6 +75,10 @@ COMMON += r'''
 bool sensorLatest(SensorData* out) {
  if(!out)return false;
  *out=SensorData{25.25f,50.5f,100123,12345,true};return true;
+}
+bool sensorLatestSnapshot(SensorSnapshot* out) {
+ if(!out)return false;
+ *out=SensorSnapshot{};return sensorLatest(&out->environment);
 }
 '''
 
@@ -177,7 +182,7 @@ constexpr int16_t LW_ERR_INVALID_ARGUMENT=-100, LW_ERR_PERSISTENCE=-32000, LW_ER
 bool activated=false, joinWorks=true, persistence=true;
 int joins=0, recoveries=0, sendResult=0, activationResult=-42;
 bool recoveryWorks=true;
-size_t limit=11;
+size_t limit=53;
 uint32_t eligibleAt=0,forcedWait=0,waitAfterSend=0;
 unsigned eligibilityQueries=0,capacityChanges=0;
 bool capacityWorks=true,capacityImproves=true;
@@ -198,12 +203,12 @@ bool lwTryCapacityDataRate(size_t,uint16_t& tried) {
  if(tried & 1) { return false; }
  tried|=1;++capacityChanges;
  if(!capacityWorks) { return false; }
- if(capacityImproves) { sendResult=0;limit=11; }
+ if(capacityImproves) { sendResult=0;limit=53; }
  return true;
 }
 int16_t lwSendReceive(const uint8_t* data,size_t size,uint8_t*,size_t* received) {
- const uint8_t expected[]={0x1f,0x09,0xdd,0x13,0xba,0xc3,0x8e,0,0,0x30,0x39};
- assert(activated); assert(*received==0); assert(size==0 || (size==11 && memcmp(data,expected,11)==0));
+ const uint8_t expected[]={0x2f,0x09,0xdd,0x13,0xba,0xc3,0x8e,0,0,0x30,0x39};
+ assert(activated); assert(*received==0); assert(size==0 || (size==24 && memcmp(data,expected,11)==0));
  sends.push_back(ticks); lengths.push_back(size);
  *received=0;
  if(waitAfterSend) { forcedWait=waitAfterSend; }
@@ -214,7 +219,7 @@ int16_t lwSendReceive(const uint8_t* data,size_t size,uint8_t*,size_t* received)
 run('scheduler', COMMON + FAKES + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks; while(uint32_t(ticks-start)<ms) loop(); }
 void reset() {
- ticks=0; activated=false; joinWorks=true; persistence=true; sendResult=0; limit=11;
+ ticks=0; activated=false; joinWorks=true; persistence=true; sendResult=0; limit=53;
  eligibleAt=0;forcedWait=0;waitAfterSend=0;eligibilityQueries=0;capacityChanges=0;capacityWorks=true;capacityImproves=true;joins=0;activationResult=-42;sends.clear();lengths.clear();
  gJoinHardwareFailures=0;gUplinkHardwareFailures=0;gCapacityFailures=0;gCapacityRatesTried=0;gRetryBackoffMs=5000; gUnavailableAttempts=0; gRecoveryAttempts=0; recoveries=0; recoveryWorks=true; gReportWaitMs=60000; setup();
 }
@@ -231,7 +236,7 @@ int main() {
  joinWorks=true; advance(1500); assert(sends.empty() && joins==2);
  advance(60000); assert(sends.size()==1);
  reset(); limit=8; advance(60500); assert(lengths.size()==1 && lengths[0]==0);
- limit=11; advance(61000); assert(lengths.size()==2 && lengths[1]==11);
+ limit=53; advance(61000); assert(lengths.size()==2 && lengths[1]==24);
  reset(); eligibleAt=ticks+70000; advance(60500); assert(sends.empty()); advance(10100); assert(sends.size()==1);
  reset(); sendResult=-42; advance(60500); assert(sends.size()==1);
  advance(5500); assert(sends.size()==2); advance(10000); assert(sends.size()==3);
@@ -251,7 +256,7 @@ int main() {
    assert(lengths[i]==0);
    if(i) assert(uint32_t(sends[i]-sends[i-1])>=60000);
  }
- limit=11;advance(61000);assert(lengths.back()==11 && recoveries==0);
+ limit=53;advance(61000);assert(lengths.back()==24 && recoveries==0);
  // A newly joined session gets the initial retry delay, even after a long fault.
  reset(); sendResult=-42;advance(400000);assert(gRetryBackoffMs==300000);
  activated=false;gSchedulerState=SCHED_WAIT_FOR_JOIN;gLastJoinAttemptMs=ticks-60000;
@@ -424,7 +429,8 @@ public:
    assert(durableLimit()>devNonce); ++radioCalls; ++devNonce;
    active=joinWorks;return joinWorks?RADIOLIB_LORAWAN_NEW_SESSION:-42;
  }
- size_t getMaxPayloadLen() { return 11; }
+ int16_t setDatarate(uint8_t) { return 0; }
+ size_t getMaxPayloadLen() { return 53; }
  int16_t sendReceive(const uint8_t*,size_t,uint8_t,uint8_t*,size_t* len,bool,LoRaWANEvent_t*,LoRaWANEvent_t*) {
    if(receiveResult>0) *len=3;
    if(receiveResult<0) *len=255;
@@ -721,7 +727,8 @@ public:
  }
  void scheduleTransmission(uint32_t when) { tUplink=when; }
  uint32_t dutyCycleInterval(uint32_t interval,uint32_t) { return interval; }
- uint8_t getMaxPayloadLen() { return 11; }
+ int16_t setDatarate(uint8_t) { return 0; }
+ uint8_t getMaxPayloadLen() { return 53; }
  int16_t sendReceive(const uint8_t* data,size_t len,uint8_t,uint8_t*,size_t*,bool,LoRaWANEvent_t*,LoRaWANEvent_t*) {
   if(!isActive)return RADIOLIB_ERR_NETWORK_NOT_JOINED;
   LoRaWANChannel_t channel;
@@ -984,7 +991,7 @@ void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)
 int main() {
  setup();sendResult=RADIOLIB_ERR_PACKET_TOO_LONG;
  advance(181000);assert(sends.size()==3 && capacityChanges==1 && gSchedulerState!=SCHED_FAULT);
- advance(61000);assert(sends.size()==4 && lengths.back()==11 && gCapacityRatesTried==0);
+ advance(61000);assert(sends.size()==4 && lengths.back()==24 && gCapacityRatesTried==0);
  // A candidate that still fails is not selected again indefinitely.
  sendResult=RADIOLIB_ERR_DWELL_TIME_EXCEEDED;capacityImproves=false;
  advance(361000);assert(gSchedulerState==SCHED_FAULT);
@@ -1039,7 +1046,7 @@ struct Band {
  uint8_t bandNum=1,payloadLenMax[15]={11,53,125},dataRates[15]={};
  Band() { std::fill(dataRates+3,dataRates+15,255); }
 };
-''').replace('uint8_t getMaxPayloadLen() { return 11; }', r'''
+''').replace('int16_t setDatarate(uint8_t) { return 0; }', '').replace('uint8_t getMaxPayloadLen() { return 53; }', r'''
  uint8_t fOptsUpLen=0;bool TS009=false,TS011=false,isMACPayload=false,phyRejectDataRate=false;
  LoRaWANChannel_t channelPlan[2][16];
  uint8_t getMaxPayloadLen();int16_t isValidUplink(uint8_t*,uint8_t);int16_t setDatarate(uint8_t);
@@ -1071,6 +1078,8 @@ capacity_methods = stock_methods + ''.join(radio_method(signature) for signature
 ))
 capacity_selector = lw[lw.index('bool lwTryCapacityDataRate('):]
 capacity_state = STOCK_STATE.replace('bool lwTryCapacityDataRate(size_t,uint16_t&) { return false; }', '')
+capacity_state = capacity_state.replace('size_t lwMaxPayloadBytes() { return gNode.getMaxPayloadLen(); }',
+    lw[lw.index('size_t lwMaxPayloadBytes()'):lw.index('uint32_t lwTimeUntilUplink()')])
 capacity_integration = (COMMON + error_constants + schema + capacity_defines + capacity_fixture +
                         templates + capacity_methods + node_class + capacity_state + save + recover +
                         activate + wrapper + capacity_selector)
@@ -1079,11 +1088,13 @@ void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)
 int main() {
  mod.hal=&hal;gRadio.mod=&mod;setup();advance(67000);
  assert(lwIsActivated() && gRadio.uplinkCalls==1);
- gNode.fOptsUpLen=12;assert(lwMaxPayloadBytes()==255);
+ // Even if a server command changes DR, production preflight restores DR1.
+ gNode.channels[0].dr=0;gNode.fOptsUpLen=12;
+ assert(gNode.getMaxPayloadLen()==255); // Reproduce the stock DR0 underflow.
+ assert(lwMaxPayloadBytes()==41 && gNode.channels[0].dr==1);
  advance(181000);
- assert(gNode.channels[0].dr==1 && gRadio.uplinkCalls==1 && initializations==1);
- advance(61000);
- assert(gRadio.uplinkCalls>=2 && gNode.fOptsUpLen==12 && gSchedulerState!=SCHED_FAULT);
+ assert(gNode.channels[0].dr==1 && gRadio.uplinkCalls>=4 && initializations==1);
+ assert(gNode.fOptsUpLen==12 && gSchedulerState!=SCHED_FAULT);
  // Only the enabled uplink channel plan can authorize a candidate rate.
  uint16_t tried=0;
  for(auto& channel:gNode.channelPlan[0]) { channel.drMax=0; }
@@ -1418,6 +1429,8 @@ Hal hal;Module mod;SX1262 gRadio(&mod);
 struct Region {} gRegion;
 class PersistentLoRaWANNode {
 public:
+ bool adr=true;
+ void setADR(bool enabled) { adr=enabled; }
  PersistentLoRaWANNode(SX1262*,Region*,uint8_t) { ++constructions; }
  int16_t beginOTAA(uint64_t,uint64_t,const uint8_t*,const uint8_t*) {
   ++nodeBegins;return nodeBeginResult;
@@ -1440,10 +1453,10 @@ int main() {
  // Positive control: the stock default really would request a 1.6-V TCXO.
  assert(gRadio.begin()==0 && tcxoCalls==1 && selectedTcxo==1.6f);
  resetRadio();assert(lwBegin());
- assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==1 && rfSwitchCalls==2);
+ assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==1 && rfSwitchCalls==2 && !gNode.adr);
  // Recovery must reapply the profile even if the flag was cleared beforehand.
  resetRadio();assert(lwRecover());
- assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==2 && restores==1 && constructions==2);
+ assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==2 && restores==1 && constructions==2 && !gNode.adr);
  unsigned previousBegins=nodeBegins,previousRestores=restores;
  resetRadio();chipFound=false;assert(!lwRecover());
  assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==previousBegins && restores==previousRestores);

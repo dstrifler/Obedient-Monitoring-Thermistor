@@ -1,17 +1,16 @@
-# Waveshare BME688 bench test
+# Waveshare BME688 / Bosch BSEC bench test
 
-Sensor diagnostics are enabled by default. The radio sends a fixed 11-byte
-environmental packet on FPort 1, starting 60 seconds after OTAA activation
-returns and repeating on its existing schedule. Environmental data is also
-printed through the shared Serial logger. Saved application settings and
-application downlink commands remain bypassed. See
-[ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md) for the byte layout.
+The default backend uses Bosch BSEC 2.6.1.0 for IAQ, CO2-equivalent and
+breath-VOC-equivalent, plus sensor-heat-compensated temperature/humidity where
+available, pressure and raw gas resistance. Radio reports are 24 bytes every
+minute, first sent 60 seconds after activation. See
+[ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md) for the wire contract/decoder.
 
 ## Wiring
 
-Disconnect power before wiring the Waveshare BME688 Environmental Sensor:
+Keep the existing I2C connection:
 
-| Sensor connector label | expLoRaBLE header |
+| Sensor connector | expLoRaBLE header |
 | --- | --- |
 | VCC | 3V3 |
 | GND | GND |
@@ -20,76 +19,97 @@ Disconnect power before wiring the Waveshare BME688 Environmental Sensor:
 | ADDR/MISO | Disconnected |
 | CS | Disconnected |
 
-This uses the breakout's documented default I2C interface at `0x77`, with its
-onboard address/CS pull-ups. It uses `Wire1`, not the board's Qwiic connector
-(`Wire`). The existing non-secret configuration is `SENSOR_USE_WIRE1=1` and
-`SENSOR_I2C_ADDR=0x77`. No radio pin or SPI bus is reassigned.
+This uses Wire1 and address 0x77, with the Waveshare breakout's default pull-ups.
+The Qwiic Wire connector is not used. Radio pins/SPI1 are unchanged.
 
-## Build and expected output
+## Stock dependencies
 
-Install **BME68x Sensor library by Bosch Sensortec, version 1.3.40408**, through
-Arduino Library Manager. Keep stock RadioLib 7.1.2 and the existing SparkFun
-Apollo3 board setup and reserved flash layout. No third-party source is patched.
-The guarded board script selects the Bosch library at
-`$THERMISTOR_TOOLS_DIR/user/libraries/BME68x`; `BME68X_UPSTREAM` can select another
-installation directory. Its default tools directory is
-`/workspace/.thermistor-tools`.
+- SparkFun Apollo3 board package 2.2.1 (internal platform 2.0.0).
+- RadioLib **7.1.2**.
+- Bosch **BME68x Sensor library 1.3.40408**.
+- Bosch **bsec2 1.10.2610**, containing BSEC **2.6.1.0**.
 
-After startup clock verification, open Serial at **115200 baud**. The monitor
-attempts its first measurement when the scheduler starts, then one per minute.
-Join/uplink calls can delay collection/printing until RadioLib returns. Example:
+Install the libraries through Arduino Library Manager or Arduino CLI. The build
+verifier checks Bosch's hard-float Cortex-M4 archive, public headers and
+bme688_sel_33v_3s_4d profile against the supported upstream release. Dependencies
+are used without source changes. [Bosch upstream](https://github.com/boschsensortec/Bosch-BSEC2-Library)
+provides the library and license.
 
-```text
-[INFO][Sensor] BME68x ready at I2C address 0x77.
-[INFO][Sensor] T=25.25 C, RH=50.50 %, P=1001.23 hPa, gas=12345 ohm
-```
+## Local build on Linux
 
-Gas is reported as `unavailable` unless the sample has both gas-valid and
-heater-stable flags and a finite, positive resistance. Temperature, humidity,
-and pressure can still be reported in that case. Raw gas resistance is not a
-calibrated air-quality score, CO2 concentration, or identification of a gas.
-The firmware does not include BSEC processing.
-
-The driver checks initialization, oversampling, heater setup, trigger, and read
-status. It schedules the forced-mode wait using Bosch's T/P/H duration plus
-the programmed 100-ms heater period and a 5-ms margin. It never deliberately
-sleeps through that wait; normal synchronous library/bus operations still run
-on the main thread. A missing/not-ready sample gets up to one extra second;
-fresh data retained across a blocking radio call is accepted when it returns.
-Invalid T/P/H readings are discarded without overwriting the caller's data.
-
-Sensor errors log a warning and retry after 60 seconds; they do not fault or
-rejoin the radio. Sampling and radio transactions execute sequentially on the
-main thread. There is no sensor access or Serial pumping inside a RadioLib
-join/uplink call. Sampling can continue if radio work enters its paused state.
-No sensor activity starts if clock/EEPROM startup fails before sensor startup.
-
-To build the radio-only fallback, set `SENSOR_SERVICE_ENABLED=0` in
-`firmware_features.h`, or use `THERMISTOR_SENSOR_ENABLED=0` with the board script.
-That build does not require the Bosch library or initialize the sensor bus;
-it transmits full-length packets with all validity flags cleared.
-
-## Validation
+The stock Apollo3 core's linker recipe does not automatically link BSEC's
+precompiled archive. **A normal Arduino IDE 1.8.19 Verify build therefore needs
+additional linker configuration.** The project helper supplies it per build,
+including the existing reserved-flash guard, without editing the core/library.
+Install [Arduino CLI](https://arduino.github.io/arduino-cli/latest/installation/)
+and Python 3, with access to the installed board package/libraries, then run:
 
 ```sh
-python3 tests/check_sensor.py
-python3 tests/check_logic.py
-python3 tests/check_modules.py
-python3 tests/check_logging.py
-python3 tests/check_radio_hal.py
-bash tools/check-board.sh
+python3 tools/build-local.py
 ```
 
-The focused sensor checks compile Bosch's actual unmodified C++ wrapper with
-a simulated lower sensor API, then link the real sensor monitor, logger, and
-application state machine. They cover forced-mode `getData()` returning zero,
-measurement/heater timing, status errors, readiness/timeout/retry, gas flags,
-invalid numbers, timer wrap, negative temperature formatting, missing hardware,
-UART backpressure, sample freshness, fixed environmental bytes, MAC-only
-deferral, and preserved one-minute radio cadence at OFF/INFO/TRACE.
-The board build also compiles Bosch's real lower C API. Physical measurements,
-sensor disconnection/reconnection, and continued Helium delivery still require
-bench verification.
+If needed, --config-file PATH selects an Arduino CLI configuration that uses
+your installed Arduino sketchbook/packages. --bsec-dir PATH selects an
+unmodified BSEC library outside the usual sketchbook. --cli PATH and
+--compiler-path PATH select existing tools; they do not install/change tools.
 
-The historical settings-dependent all-fields encoder still occupies 14 bytes.
-The active test uses the fixed 11-byte encoder documented in ENVIRONMENT_PACKET.md.
+The helper stages an IDE-compatible sketch name, checks dependencies, generates
+a private linker script, builds, and places firmware files in the sibling
+<repository-name>_build directory. It prints an explicit upload command:
+
+```sh
+arduino-cli upload --fqbn SparkFun:apollo3:lora_thing_plus --port /dev/ttyUSB0 --input-dir "../Obedient_Monitoring_Thermistor_build"
+```
+
+Use the actual output path/device port. Building does not upload automatically.
+Both build and upload use the same CLI configuration when one is required.
+
+In the managed build environment:
+
+```sh
+BSEC_UPSTREAM=/path/to/Bosch-BSEC2-Library bash tools/check-board.sh
+```
+
+Its default BSEC installation is
+$THERMISTOR_TOOLS_DIR/user/libraries/bsec2. BME68X_UPSTREAM can similarly select
+the stock sensor library. No third-party code or board-core files are modified
+by either build helper.
+
+## First physical test
+
+1. Update/save the complete decoder before expecting the new fields in MQTT.
+2. Flash and open Serial at 115200. Expect BSEC startup, normal OTAA join, and
+   the first 24-byte FPort 1 report 60 seconds after joining.
+3. Confirm normal uplinks show SF9/BW125 (DR1). Leave network ADR disabled.
+4. Check all environmental values and the three estimates in decoded MQTT data.
+   VOC is an estimate in **ppm**; Serial displays rounded **ppb**.
+5. Watch IAQ accuracy/readiness. Accuracy 0 during initial calibration is
+   expected; it does not establish reliable air quality. There is no promised
+   fixed time to reach accuracy 3.
+6. Confirm sampling continues during joins/receive windows, stable reporting,
+   and no new Mbed fault. This concurrency needs physical validation.
+7. After calibration has been saved, reboot and check continued calibration
+   behavior. LoRaWAN still performs a fresh OTAA join with preserved nonces.
+
+Temperature/humidity may differ from the former once/minute raw readings because
+sampling/heater cadence changes and Bosch compensates sensor self-heating. No
+board-specific offset is guessed. Move away from vents for room measurements.
+CO2-equivalent/VOC-equivalent are algorithm estimates, not independent gas
+concentrations or a substitute for a CO/exhaust detector.
+
+Sensor errors retry after 60 seconds, clear stale data, and do not force a radio
+rejoin. BSEC runs only on a normal worker thread; Serial and EEPROM stay on the
+main thread. EEPROM calibration storage and nonce journal are independent.
+
+## Fallback builds
+
+THERMISTOR_BSEC_ENABLED=0 selects the previous raw sensor backend with the
+guarded board script. It sends v2 environmental slots, with BSEC estimates
+unavailable. It samples once/minute and has no BSEC dependency. Setting
+THERMISTOR_SENSOR_ENABLED=0 builds without sensor dependencies/bus activity;
+reports retain their 24-byte format with all measurements unavailable.
+
+Equivalent compile-time switches are in firmware_features.h. These fallbacks
+do not add adaptive reporting. Host raw-backend tests continue using the actual
+unmodified Bosch wrapper; BSEC tests use the real public headers with hardware
+and opaque algorithm calls simulated. Board builds link the actual ARM binary.

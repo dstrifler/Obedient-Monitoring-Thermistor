@@ -1,7 +1,23 @@
 #include "sensor_service.h"
 #include "firmware_features.h"
 
-#if SENSOR_SERVICE_ENABLED
+#if SENSOR_SERVICE_ENABLED && SENSOR_BSEC_ENABLED
+#include "bsec_service.h"
+void sensorStart() { bsecStart(); }
+void sensorPoll() { bsecPoll(); }
+bool sensorLatestSnapshot(SensorSnapshot* data) { return bsecLatest(data); }
+bool sensorLatest(SensorData* data) {
+  SensorSnapshot snapshot = {};
+  if(data == nullptr || !bsecLatest(&snapshot)) { return false; }
+  *data = snapshot.environment;
+  return true;
+}
+bool sensorPresent() { return bsecPresent(); }
+// The BSEC worker exclusively owns the bus; manual conversions are unavailable.
+bool sensorBegin() { return false; }
+bool sensorTrigger() { return false; }
+bool sensorFetch(SensorData*) { return false; }
+#elif SENSOR_SERVICE_ENABLED
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
@@ -26,6 +42,16 @@ static constexpr uint32_t SAMPLE_MAX_AGE_MS = 65000;
 static SensorData gLatestSample = {};
 static bool gHaveLatestSample = false;
 static uint32_t gLatestSampleMs = 0;
+static uint32_t gLatestSampleUptimeSeconds = 0;
+static uint32_t gUptimeTick = 0;
+static uint64_t gUptimeMs = 0;
+
+static uint64_t sensorUptimeMs() {
+  const uint32_t now = millis();
+  gUptimeMs += uint32_t(now - gUptimeTick);
+  gUptimeTick = now;
+  return gUptimeMs;
+}
 
 enum SensorState : uint8_t { SENSOR_STOPPED, SENSOR_START, SENSOR_WAIT, SENSOR_COOLDOWN };
 static SensorState gSensorState = SENSOR_STOPPED;
@@ -41,6 +67,7 @@ static bool sensorFailure(const char* operation) {
 }
 
 bool sensorBegin() {
+  sensorUptimeMs();
   gSensorPresent = false;
   gMeasurementPending = false;
   gHaveLatestSample = false;
@@ -127,6 +154,8 @@ bool sensorFetch(SensorData* data) {
   // Forced-mode data can remain in the chip across a long blocking radio
   // call. Age from estimated conversion completion, not delayed collection.
   gLatestSampleMs = gMeasurementStartedMs + gMeasurementWaitMs;
+  const uint64_t nowUptime = sensorUptimeMs();
+  gLatestSampleUptimeSeconds = uint32_t((nowUptime - uint32_t(gUptimeTick - gMeasurementStartedMs) + gMeasurementWaitMs) / 1000ULL);
   gHaveLatestSample = true;
   return true;
 }
@@ -137,6 +166,14 @@ bool sensorLatest(SensorData* data) {
   if(data == nullptr || !gHaveLatestSample || !gSensorPresent ||
      uint32_t(millis() - gLatestSampleMs) > SAMPLE_MAX_AGE_MS) { return false; }
   *data = gLatestSample;
+  return true;
+}
+
+bool sensorLatestSnapshot(SensorSnapshot* data) {
+  SensorSnapshot snapshot = {};
+  if(data == nullptr || !sensorLatest(&snapshot.environment)) { return false; }
+  snapshot.sampleUptimeSeconds = gLatestSampleUptimeSeconds;
+  *data = snapshot;
   return true;
 }
 
@@ -170,6 +207,7 @@ void sensorStart() {
 
 void sensorPoll() {
   if(gSensorState == SENSOR_STOPPED) { return; }
+  sensorUptimeMs();
   const uint32_t now = millis();
   if(gSensorState == SENSOR_COOLDOWN) {
     if(now - gCycleStartedMs < SAMPLE_INTERVAL_MS) { return; }
@@ -203,5 +241,6 @@ bool sensorBegin() { return false; }
 bool sensorTrigger() { return false; }
 bool sensorFetch(SensorData*) { return false; }
 bool sensorLatest(SensorData*) { return false; }
+bool sensorLatestSnapshot(SensorSnapshot*) { return false; }
 bool sensorPresent() { return false; }
 #endif

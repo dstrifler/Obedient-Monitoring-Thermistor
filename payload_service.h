@@ -12,6 +12,11 @@ static constexpr uint8_t ENVIRONMENT_PACKET_VERSION = 1;
 // Null data produces a full-length packet with all validity flags cleared.
 size_t payloadEncodeEnvironment(uint8_t* buffer, size_t maxLen, const SensorData* data);
 
+// Version 2 retains the original environmental slots, adding Bosch estimates,
+// status and acquisition uptime. All integer and binary32 fields are big-endian.
+static constexpr size_t ENVIRONMENT_REPORT_SIZE = 24;
+size_t payloadEncodeReport(uint8_t* buffer, size_t maxLen, const SensorSnapshot* data);
+
 enum DownlinkCommandType : uint8_t {
   CMD_NONE                 = 0x00,
   CMD_SET_TEMP_ENABLED     = 0x01,

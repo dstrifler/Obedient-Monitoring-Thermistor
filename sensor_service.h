@@ -11,17 +11,37 @@ struct SensorData {
   bool gasValid;  // Gas resistance is usable only with valid/stable heater flags.
 };
 
-// Cooperative main-thread monitor: first sample immediately, then every minute.
-// Bus transfers are synchronous; the forced-mode measurement wait is scheduled.
+struct AirQualityData {
+  float iaq;
+  float co2EquivalentPpm;
+  float breathVocEquivalentPpm;
+  uint8_t validMask;  // bit 0 IAQ, bit 1 CO2-equivalent, bit 2 VOC-equivalent.
+  uint8_t iaqAccuracy;  // Bosch indicator: 0 initializing, 1 low, 2 medium, 3 high.
+  bool stabilized;
+  bool runIn;
+};
+
+struct SensorSnapshot {
+  SensorData environment;
+  AirQualityData airQuality;
+  uint32_t sampleUptimeSeconds;  // Acquisition time since boot; not Unix time.
+  bool temperatureHumidityCompensated;
+};
+
+// Atomic snapshot of one acquisition, including derived outputs when available.
+bool sensorLatestSnapshot(SensorSnapshot* data);
+
+// Main-thread entry points. Default BSEC backend samples in its own worker at
+// the Bosch LP rate (3 seconds); raw fallback is cooperative and samples/minute.
 void sensorStart();
 void sensorPoll();
 
-// Copies the latest validated sample, at most 65 seconds old. Missing, failed,
+// Copies the latest validated sample (10 s BSEC / 65 s raw fallback). Missing, failed,
 // or stale acquisition returns false and leaves *data unchanged.
 bool sensorLatest(SensorData* data);
 
-// Begin configures only; trigger starts one conversion. Fetch returns false
-// while pending or on failure, leaving *data unchanged.
+// Manual raw-backend conversions; unavailable when BSEC owns the sensor.
+// Fetch returns false while pending/on failure and leaves *data unchanged.
 bool sensorBegin();
 bool sensorTrigger();
 bool sensorFetch(SensorData* data);

@@ -262,7 +262,9 @@ void loop() {
   logPump();
   uint32_t now = millis();
   int32_t waitMs = (int32_t)(gNextSchedulerTickMs - now);
-  if(waitMs > 0) {
+  // A long execution gap can alias an overdue deadline into a positive wait.
+  // Only a deadline within our normal slice may sleep; otherwise resync below.
+  if(waitMs > 0 && uint32_t(waitMs) <= LOOP_SLICE_MS) {
     delay((uint32_t)waitMs);  // Yield until the next application scheduler tick.
     now = millis();
     if((int32_t)(now - gNextSchedulerTickMs) < 0) {

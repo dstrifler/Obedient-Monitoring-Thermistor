@@ -254,6 +254,45 @@ int main() {
 }
 ''')
 
+run('scheduler_long_execution_gaps', COMMON.replace(
+    'void delay(uint32_t ms) { ticks += ms; }',
+    'uint32_t maxApplicationDelay=0;\n'
+    'void delay(uint32_t ms) { maxApplicationDelay=std::max(maxApplicationDelay,ms);ticks+=ms; }')
+    + FAKES + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+void reset() {
+ ticks=0;activated=false;sends.clear();lengths.clear();setup();loop();
+ maxApplicationDelay=0;
+}
+int main() {
+ const uint32_t gaps[]={0,1,49,50,51,1000,600000,0x7fffffff,0x80000000,
+                        0x80000032,0x80000033,0x90000000,UINT32_MAX-1};
+ for(uint32_t gap:gaps) {
+  reset();ticks+=gap;uint32_t resumed=ticks;loop();
+  assert(maxApplicationDelay<=50 && uint32_t(ticks-resumed)<=50);
+  assert(gNextSchedulerTickMs==ticks+50);
+  if(gap==UINT32_MAX-1) { assert(gSchedulerState==SCHED_RECOVER_RADIO); }
+ }
+ // Resume ordinary reports after the former multi-day sleep trigger, keeping
+ // the normal cadence instead of sending a burst for missed intervals.
+ reset();advance(500);assert(sends.size()==1);
+ ticks+=0x90000000UL;uint32_t resumed=ticks;maxApplicationDelay=0;
+ // Explicitly allow RF now: the fake eligibility timer's signed comparison
+ // only supports shorter gaps, unlike this scheduler regression.
+ eligibleAt=ticks;
+ advance(500);
+ assert(sends.size()==2 && uint32_t(sends.back()-resumed)<=100);
+ advance(59000);assert(sends.size()==2);
+ advance(1500);assert(sends.size()==3 && sends[2]-sends[1]>=60000);
+ assert(maxApplicationDelay<=50);
+ // A long gap never revives a fault or delays its heartbeat by a huge sleep.
+ appFault("Injected paused state");size_t before=sends.size();
+ ticks+=0x90000000UL;maxApplicationDelay=0;resumed=ticks;loop();
+ assert(gSchedulerState==SCHED_FAULT && sends.size()==before);
+ assert(maxApplicationDelay<=50 && uint32_t(ticks-resumed)<=50);
+}
+''')
+
 # Test the independent RTC measurement, including hour rollover and a stopped RTC.
 clock = (ROOT / 'clock_service.h').read_text()
 clock = clock[clock.index('static bool clockReadRtcHundredths'):clock.index('bool clockBegin()')]

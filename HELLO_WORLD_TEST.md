@@ -184,7 +184,10 @@ errors (TX/RX timeout, SPI write/command errors, or chip-not-found) enter the sa
 cooldown/recovery state as a stuck uplink. Ordinary network join failures clear
 that hardware-error streak. Successful joins reset the streak and retry backoff.
 Radio initialization gets three attempts. The idle scheduler yields to the RTOS
-instead of continuously spinning.
+instead of continuously spinning. It only sleeps for a scheduler deadline within
+the normal 50-ms slice. Stale deadlines, including ones that appear positive
+after a long execution gap, are resynchronized before radio/fault processing
+without a multi-day idle sleep.
 
 Three consecutive `UPLINK_UNAVAILABLE` results with zero reported airtime wait
 enter an application recovery state. A positive airtime wait clears this count.
@@ -283,6 +286,8 @@ release 2.2.1 and RadioLib 7.1.2. The core archive internally reports 2.0.0. GCC
 returns HTTP 403. Tests cover journal interruptions/rollover/corruption, durable
 nonce reservation before TX, nonce exhaustion, absent/real downlinks, scheduler
 cadence/rollover/retries/eligibility/faults, and independent RTC rate checks.
+Long-gap regressions cover thirteen idle-deadline boundaries, resuming the
+one-minute cadence without catch-up bursts, and keeping faults paused.
 Checks for the patched library's payload arithmetic, timer comparisons, error
 cleanup, and nonce consumption were removed with those patches. Retained checks
 exercise firmware scheduling, nonce reservation, the OTAA-only compile guard,

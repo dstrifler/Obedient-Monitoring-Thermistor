@@ -13,9 +13,19 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
 - FPort: `LORA_UPLINK_FPORT` (currently 1).
 - Payload: exactly 11 ASCII bytes, `Hello World`, without a trailing NUL.
 - Expected hex: `48656c6c6f20576f726c64`.
-- First application packet follows successful OTAA activation; subsequent
+- First application packet is scheduled no earlier than 60 seconds after
+  successful OTAA activation returns, including after recovery and rejoining.
+  The scheduler and serial output remain active throughout this wait; no
+  blocking one-minute delay is used. Subsequent
   application packets are scheduled 60 seconds apart, subject to radio/network
   eligibility and transaction overhead.
+- RadioLib processes JoinAccept parameters before activation returns and MAC
+  commands during `sendReceive()`. The Class A radio receives downlinks in the
+  transaction's receive windows; idling for a minute does not open extra windows
+  or fetch queued commands. MAC commands sent in response to the first uplink
+  are therefore processed during that transaction if it reaches reception;
+  a transmit error can return before the receive windows and MAC processing.
+  Application setting commands remain ignored for this fixed Hello World test.
 - Empty application transactions can carry pending MAC commands when the live
   payload limit cannot fit the text. Persistent MAC responses may need further
   downlinks; successful maintenance transactions continue at the normal

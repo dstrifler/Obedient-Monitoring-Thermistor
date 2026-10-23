@@ -182,8 +182,10 @@ static bool ensureJoined() {
     gCapacityRatesTried = 0;
     gRetryBackoffMs = REPORT_RETRY_BACKOFF_MS;
     gReportWaitMs = REPORT_INTERVAL_MS;
-    gLastReportMs = millis() - REPORT_INTERVAL_MS;
-    LOG_DEBUG("LoRaWAN", "Join successful.");
+    // Start the first interval after activation has returned, including after
+    // recovery. Keep servicing the scheduler and serial output while waiting.
+    gLastReportMs = millis();
+    LOG_INFO("LoRaWAN", "Joined; first uplink scheduled in 60 seconds.");
     return true;
   }
 
@@ -223,7 +225,7 @@ void appSetup() {
     appFault("EEPROM initialization failed.");
     return;
   }
-  LOG_INFO("Test", "Sensor disabled. Sending Hello World every 60 seconds after join.");
+  LOG_INFO("Test", "Sensor disabled. Hello World starts 60 seconds after join, then repeats every 60 seconds.");
 
   bool radioReady = false;
   for(uint8_t attempt = 0; attempt < 3 && !radioReady; ++attempt) {

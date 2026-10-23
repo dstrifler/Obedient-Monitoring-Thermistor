@@ -168,7 +168,7 @@ int main(){
  ++fakeMs;assert(lwTimerRolloverPending());fakeMs=0;assert(!lwTimerRolloverPending());
  setup();assert(fakeMs>=41000 && fakeMs<=41100 && EEPROM.initCalls==1);
  assert(Serial.begins==1);
- advance(185000);assert(joins==1 && sends.size()==4);
+ advance(245000);assert(joins==1 && sends.size()==4);
  for(size_t i=1;i<sends.size();++i)assert(sends[i]-sends[i-1]>=60000);
  fakeMs+=0x90000000UL;uint32_t resumed=fakeMs;
  loop();loop();assert(sends.size()==5 && uint32_t(fakeMs-resumed)<=100);

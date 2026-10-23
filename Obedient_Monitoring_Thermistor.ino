@@ -319,7 +319,10 @@ void loop() {
       if(macOnly) { LOG_INFO("Payload", "MAC-only transaction; Hello World remains pending."); }
       else { LOG_DEBUG("Payload", "Hello World: 11 bytes."); }
       gPendingDownlinkLen = 0;
-      LOG_DEBUG("LoRaWAN", "Sending uplink ...");
+      // Capacity queries configure the PHY. Log the existing result so the
+      // output level cannot add radio operations or consume SPI failures.
+      LOG_DEBUG("LoRaWAN", "Uplink preflight: max_payload=%u bytes=%u",
+        unsigned(maxPayloadBytes), unsigned(macOnly ? 0 : payloadLen));
 
       int16_t state = lwSendReceive(
         HELLO_WORLD_PAYLOAD,

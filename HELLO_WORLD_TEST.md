@@ -53,6 +53,8 @@ A level includes all more severe messages. Use `LOG_ERROR`, `LOG_WARN`,
 `LOG_INFO`, `LOG_DEBUG`, `LOG_TRACE` and `LOG_TRACE_HEX`; disabled macros do not
 evaluate their arguments or format messages. Output consists of complete lines
 such as `[WARN][LoRaWAN] Join failed: code=-705`. There are no event timestamps.
+Preflight output uses the scheduler's existing capacity result; changing the
+output level adds no payload-capacity query or PHY configuration.
 The old `clockLogTimestamp()` helper and all raw millis/STIMER capture output
 have been removed. Clock calibration/rate verification, scheduler deadlines,
 rollover protection and fault-message rate limits remain functional timers.
@@ -320,8 +322,10 @@ state across translation units, queue overflow/priority, retention of partly
 transmitted lines, truncation/hex formatting, UART backpressure and write errors,
 byte/time budgets across micros rollover, and drop notices. The scheduler check
 also holds the UART unwritable through normal reports and a fault, then verifies
-that error output drains when the UART becomes ready. Set `LOGIC_LOG_LEVEL=0`
-or `LOGIC_LOG_LEVEL=5` to run firmware checks at OFF or TRACE. Optional
+that error output drains when the UART becomes ready. A transient SPI-failure
+check verifies that verbosity does not change radio operations or error handling.
+Set `LOGIC_LOG_LEVEL` to a value from 0 through 5 to check any of the six levels,
+including ERROR and WARN without expecting compiled-out INFO congestion. Optional
 `LOGGING_SANITIZERS=1` enables address/undefined-behavior instrumentation for the
 focused serial checks.
 

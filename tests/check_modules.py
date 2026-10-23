@@ -152,7 +152,8 @@ int main(){
  assert(settingsGet()->humidityEnabled && settingsSetReportInterval(30));
  changeOther();assert(!settingsGet()->humidityEnabled);
  settingsSave();settingsSetReportInterval(60);settingsLoad();assert(settingsGet()->reportIntervalMin==30);
- settingsResetDefaults();SensorData data{25.0f,50.0f,100000.0f,1234};
+ settingsResetDefaults();SensorData data{25.0f,50.0f,100000.0f,1234,true};
+ sensorStart();sensorPoll();
  assert(!sensorBegin() && !sensorTrigger() && !sensorFetch(&data) && !sensorPresent());
  assert(data.temperatureC==25.0f && data.gasOhms==1234);
  uint8_t payload[256];assert(payloadEncodeUplink(payload,sizeof(payload),&data,settingsGet())==14);
@@ -217,48 +218,7 @@ with tempfile.TemporaryDirectory(prefix='thermistor-modules-') as tmp:
     sources = ['app_service.cpp', 'clock_service.cpp', 'eeprom_service.cpp', 'lorawan_timer.cpp',
                'nonce_store.cpp', 'payload_service.cpp', 'sensor_service.cpp', 'settings_service.cpp',
                'log_service.cpp', 'sketch.cpp', 'backends.cpp', 'other.cpp', 'main.cpp']
-    compile_program(folder, sources, 'modules')
+    compile_program(folder, sources, 'modules', ['-DSENSOR_SERVICE_ENABLED=0'])
     print('PASS: separate module linking, shared state, persistence API and Arduino wrapper behavior', flush=True)
 
-    # Check the retained backend's interface behind its explicit opt-in, using
-    # a fake BME library; this does not validate the real sensor or its wiring.
-    (folder / 'Wire.h').write_text(r'''
-#pragma once
-struct WireFake {unsigned begins=0;void begin(){++begins;}};
-extern WireFake Wire,Wire1;
-''')
-    (folder / 'bme68xLibrary.h').write_text(r'''
-#pragma once
-#include <cstdint>
-#include "Wire.h"
-enum {BME68X_FORCED_MODE=1};
-struct bme68xData {float temperature=25,humidity=50,pressure=100000;uint32_t gas_resistance=1234;};
-extern bool fetchWorks,readWorks;extern unsigned bindings;
-struct Bme68x {
- void begin(uint8_t,WireFake&){++bindings;}
- void setTPH(){}void setHeaterProf(int,int){}void setOpMode(int){}
- bool fetchData(){return fetchWorks;}
- bool getData(bme68xData& out){out=bme68xData{};return readWorks;}
-};
-''')
-    (folder / 'sensor_main.cpp').write_text(r'''
-#include "sensor_service.h"
-#include "Arduino.h"
-#include "Wire.h"
-bool fetchWorks=true,readWorks=true;unsigned bindings=0;WireFake Wire,Wire1;
-uint32_t fakeMs=0;unsigned long millis(){return fakeMs;}unsigned long micros(){return uint32_t(fakeMs*1000);}
-void delay(unsigned long value){fakeMs+=value;}
-int main(){
- assert(!sensorPresent() && sensorBegin() && sensorPresent());
- assert(Wire1.begins==1 && Wire.begins==0 && bindings==1 && fakeMs==250);
- SensorData data{};assert(sensorTrigger() && sensorFetch(&data));
- assert(data.temperatureC==25 && data.gasOhms==1234);
- fetchWorks=false;assert(!sensorFetch(&data) && !sensorPresent());
- fetchWorks=true;assert(sensorTrigger() && bindings==2);
- readWorks=false;assert(!sensorFetch(&data) && !sensorPresent());
- assert(!sensorFetch(nullptr));
-}
-''')
-    compile_program(folder, ['sensor_service.cpp', 'sensor_main.cpp'], 'sensor_backend',
-                    ['-DSENSOR_SERVICE_ENABLED=1'])
-    print('PASS: retained sensor backend opt-in and failure propagation', flush=True)
+    # Enabled sensor checks use the real Bosch wrapper in check_sensor.py.

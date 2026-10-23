@@ -1,8 +1,10 @@
 # Temporary Hello World uplink test
 
-The sketch bypasses BME68x acquisition, sensor encoders, and saved application
-settings. Sensor service files remain for later development. Application commands
-are logged but ignored, keeping the text and successful-report cadence fixed.
+The sketch bypasses sensor encoders and saved application settings. BME688
+acquisition now runs alongside the radio test for Serial diagnostics; see
+[SENSOR_TEST.md](SENSOR_TEST.md) for wiring, the Bosch dependency, and behavior.
+Application commands are logged but ignored, keeping the text and
+successful-report cadence fixed.
 
 - Board: SparkFun LoRa Thing Plus expLoRaBLE (Apollo3).
 - Radio oscillator: the NM180100's SX1262 uses a 32 MHz crystal (module
@@ -75,15 +77,15 @@ interface; implementations and mutable module state live in its `.cpp` file.
 | `log_service.h/.cpp` | Shared serial queue and output service |
 | `settings_service.h/.cpp` | Retained settings schema, validation and persistence |
 | `payload_service.h/.cpp` | Retained sensor encoders and command decoder |
-| `sensor_service.h/.cpp` | Retained acquisition backend and disabled sensor interface |
+| `sensor_service.h/.cpp` | BME688 forced-mode acquisition and periodic Serial diagnostics |
 
 `config.h`, `log_config.h` and `firmware_features.h` remain configuration
-headers. The radio beta defaults to `SENSOR_SERVICE_ENABLED=0` in
-`firmware_features.h`; the sensor interface returns false without initializing
-a bus or requiring the BME library. Setting it to 1 compiles the retained I2C
-backend for future development. The Hello World application continues to bypass
-sensor acquisition, saved settings and environmental encoding. Sensor interface
-selection and hardware validation remain part of later sensor development.
+headers. The bench build defaults to `SENSOR_SERVICE_ENABLED=1` in
+`firmware_features.h`, using Bosch BME68x Sensor library 1.3.40408 and `Wire1`
+at `0x77`. Set it to 0 for the radio-only fallback without bus initialization
+or the Bosch dependency. The Hello World application continues to bypass saved
+settings and environmental encoding. See SENSOR_TEST.md for sensor wiring and
+physical validation.
 
 ## Serial output
 
@@ -308,6 +310,7 @@ range; normal network ADR remains enabled.
 python3 tests/check_logic.py
 python3 tests/check_logging.py
 python3 tests/check_modules.py
+python3 tests/check_sensor.py
 bash tools/check-board.sh
 ```
 
@@ -406,8 +409,11 @@ Module checks compile public headers independently and include them from two
 consumers. They link the production `.cpp` files separately with fake hardware,
 checking shared state, the journal copy API, EEPROM initialization, settings and
 payload compatibility, the disabled sensor interface, and Arduino setup/loop
-behavior. A separate opt-in sensor build checks the retained backend against a
-fake BME library; it does not establish correct wiring or real sensor operation.
+behavior. Focused sensor checks execute the unmodified Bosch C++ wrapper with
+a simulated lower sensor API and the actual sensor monitor/application/logger;
+they cover readiness, validation, retries, and unchanged radio behavior at
+OFF/INFO/TRACE. The board build also compiles Bosch's real lower C API. Neither
+host checks nor compilation establish physical sensor operation.
 Host checks use a staged, non-secret configuration. `MODULE_SANITIZERS=1` adds
 address/undefined-behavior instrumentation to the module-link checks.
 
@@ -432,7 +438,7 @@ receive-window processing, without the recurring timeout/rejoin cycle.
 1. Build using the guarded script and flash while preserving the storage pages.
 2. Open serial at 115200. Allow the clock settling/measurement period. Confirm
    a measured clock result, persistence readiness, radio initialization and join.
-   No sensor initialization/read should occur.
+   Sensor initialization/readings should also appear as described in SENSOR_TEST.md.
 3. In Helium, inspect raw bytes on FPort 1. Bypass the old environmental decoder.
    Confirm the text hex above and at least three packets about one minute apart.
 4. Verify that successful sends without application downlinks log zero bytes.
@@ -440,4 +446,4 @@ receive-window processing, without the recurring timeout/rejoin cycle.
    using network-side join-request logs. Controlled power-interruption testing
    remains required to validate journal behavior on actual hardware.
 
-Sensor interface identification and acquisition remain deferred.
+Environmental readings remain Serial-only during this radio baseline test.

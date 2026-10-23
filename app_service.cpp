@@ -7,6 +7,7 @@
 #include "eeprom_service.h"
 #include "lorawan_service.h"
 #include "lorawan_timer.h"
+#include "sensor_service.h"
 
 // ============================================================
 // APP STATE
@@ -226,7 +227,8 @@ void appSetup() {
     appFault("EEPROM initialization failed.");
     return;
   }
-  LOG_INFO("Test", "Sensor disabled. Hello World starts 60 seconds after join, then repeats every 60 seconds.");
+  LOG_INFO("Test", "Hello World starts 60 seconds after join, then repeats every 60 seconds.");
+  sensorStart();
 
   bool radioReady = false;
   for(uint8_t attempt = 0; attempt < 3 && !radioReady; ++attempt) {
@@ -260,7 +262,8 @@ void appSetup() {
 // ============================================================
 // LOOP
 // ============================================================
-// The test bypasses sensor acquisition and saved application settings.
+// Sensor diagnostics run alongside the fixed radio test; saved app settings
+// and environmental payload encoding remain bypassed.
 // RadioLib still owns activation and Class A receive-window timing.
 
 void appLoop() {
@@ -277,6 +280,8 @@ void appLoop() {
     }
   }
   gNextSchedulerTickMs = now + LOOP_SLICE_MS;
+  sensorPoll();  // Main thread only, outside RadioLib's Class A transactions.
+  now = millis();
 
   if(gSchedulerState != SCHED_FAULT && gSchedulerState != SCHED_WAIT_TIMER_ROLLOVER) {
     if(now < gLastSchedulerTimeMs) {

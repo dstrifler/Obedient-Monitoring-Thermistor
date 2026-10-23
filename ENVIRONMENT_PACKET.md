@@ -89,16 +89,30 @@ Unavailable fields are `null`; valid zero values remain zero. The decoder
 recognizes an empty FPort 0 MAC-only message as `{ "mac_only": true }` without
 inventing environmental readings. Other wrong ports/lengths, unsupported
 versions (including old Hello World), and malformed bytes are rejected.
-`Decoder` throws an error; `decodeUplink` returns an `errors` array. The script
-uses no Node.js APIs or external libraries. Unit conversion does not claim
+`Decoder` returns an `{ "error": "reason" }` object without measurements;
+`decodeUplink` returns an `errors` array without a `data` object. A normal error
+return avoids Helium's worker behavior of disabling a decoder after a thrown
+JavaScript exception. The script uses no Node.js APIs or external libraries.
+Unit conversion does not claim
 extra sensor accuracy, and gas resistance remains raw ohms.
 
 Run `python3 tests/check_decoder.py` with Node.js and g++ installed to check
 both entry points against actual firmware-encoded packets, all validity masks,
 negative/zero values, unsigned gas boundaries, and malformed input handling.
 
+If the console reports `ignoring_invalid_javascript`, its worker has disabled
+the script after an earlier evaluation/runtime error; this does not mean the
+current RF packet is malformed. Replace the entire saved script with the
+current file and save the changed source to create a new decoder context.
+Paste JavaScript only, without Markdown fences or leftover default code. Test
+FPort 1 with `1f09dd13bac38e00003039`, then confirm the next live uplink.
+The test also checks that unexpected messages followed by valid packets cannot
+disable decoding, and includes the observed live payload
+`1f070e15acc0f000001f8e` (18.06 C, 55.48 %RH, 98784 Pa, 8078 ohm).
+
 Interface references: [Helium decoder examples](https://github.com/helium/console-decoders)
 and [ChirpStack codec documentation](https://www.chirpstack.io/docs/chirpstack/use/device-profiles.html#javascript-functions).
+Helium error handling: [custom decoder worker](https://github.com/helium/router/blob/master/src/decoders/router_decoder_custom_worker.erl#L167).
 
 ## Acquisition and radio behavior
 

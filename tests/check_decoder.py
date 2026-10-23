@@ -71,24 +71,51 @@ for (const field of ['temperature_c','humidity_pct','pressure_pa','pressure_hpa'
 }
 assert.deepStrictEqual(plain(context.Decoder([], 0)), { mac_only: true });
 assert.deepStrictEqual(plain(context.decodeUplink({ bytes: [], fPort: 0 })), { data: { mac_only: true } });
-for (const length of [0,1,10,12,14]) assert.throws(() => decode(new Array(length).fill(0)));
-for (const port of [undefined,0,2,'1']) assert.throws(() => context.Decoder(packets[15], port));
+function expectError(call, pattern) {
+  let result;
+  assert.doesNotThrow(() => { result = plain(call()); });
+  assert.strictEqual(typeof result.error, 'string');
+  if (pattern) assert.match(result.error, pattern);
+  assert.strictEqual(result.temperature_c, undefined);
+  assert.strictEqual(result.gas_ohms, undefined);
+}
+for (const length of [0,1,10,12,14]) expectError(() => decode(new Array(length).fill(0)));
+for (const port of [undefined,0,2,'1']) expectError(() => context.Decoder(packets[15], port));
 for (let version=0; version<16; version++) {
   if (version===1) continue;
   const bytes=packets[15].slice();bytes[0]=(version<<4)|15;
-  assert.throws(() => decode(bytes), /version/);
+  expectError(() => decode(bytes), /version/);
 }
-assert.throws(() => decode(hex('48656c6c6f20576f726c64')), /version/);
+expectError(() => decode(hex('48656c6c6f20576f726c64')), /version/);
 for (const bad of [-1,256,1.5,NaN,Infinity,'1',undefined,null]) {
   const bytes=packets[15].slice();bytes[5]=bad;
-  assert.throws(() => decode(bytes), /Invalid byte/);
+  expectError(() => decode(bytes), /Invalid byte/);
 }
-for (const bad of [null,undefined,'12345678901',{}]) assert.throws(() => decode(bad));
+for (const bad of [null,undefined,'12345678901',{}]) expectError(() => decode(bad));
 for (const bad of [null, undefined, {}, { bytes: [], fPort: 1 }]) {
   const result=plain(context.decodeUplink(bad));
   assert.strictEqual(result.errors.length,1);assert.strictEqual(typeof result.errors[0],'string');
   assert.strictEqual(result.data,undefined);
 }
+// Model Helium's worker: any thrown JS error disables subsequent calls until
+// the script changes. A mixed stream must retain decoding of valid packets.
+let disabled = false;
+function heliumCall(bytes, port) {
+  if (disabled) return { error: 'ignoring_invalid_javascript' };
+  try { return plain(context.Decoder(bytes, port)); }
+  catch (_) { disabled = true; return { error: 'decoder_exception' }; }
+}
+for (const [bytes, port] of [[[],1], [[7,1],1], [[2,3],0], [packets[15],2],
+                            [hex('48656c6c6f20576f726c64'),1], [[],0]]) {
+  heliumCall(bytes, port);
+  assert.strictEqual(disabled, false);
+  assert.strictEqual(heliumCall(packets[15],1).temperature_c,25.25);
+}
+const observed = hex('1f070e15acc0f000001f8e');
+assert.deepStrictEqual(decode(observed), {
+  format_version: 1, valid_mask: 15, temperature_c: 18.06, humidity_pct: 55.48,
+  pressure_pa: 98784, pressure_hpa: 987.84, gas_ohms: 8078
+});
 console.log('PASS: actual firmware encoder -> both decoder APIs, all validity masks, signed/unsigned boundaries, zero readings, MAC-only and malformed inputs');
 '''
 

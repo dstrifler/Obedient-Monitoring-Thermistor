@@ -27,6 +27,34 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   DEBUG adds frame counter, frequency, data rate and receive-window result.
   An absent application downlink correctly reports zero bytes to the application.
 
+## Firmware layout
+
+The Arduino sketch forwards `setup()` and `loop()` to `appSetup()` and
+`appLoop()`. Keep the complete project together when building: Arduino compiles
+the root `.cpp` files automatically. Each service header declares its public
+interface; implementations and mutable module state live in its `.cpp` file.
+
+| Module | Responsibility |
+| --- | --- |
+| `app_service.h/.cpp` | Application state machine and Hello World cadence |
+| `clock_service.h/.cpp` | Crystal calibration and startup timing verification |
+| `eeprom_service.h/.cpp` | Legacy/settings layout and shared EEPROM bootstrap |
+| `lorawan_service.h/.cpp` | Radio, node, credentials, join and transaction wrappers |
+| `lorawan_timer.h/.cpp` | Transaction rollover guard |
+| `nonce_store.h/.cpp` | Flash journal and checked copies of retained nonce history |
+| `log_service.h/.cpp` | Shared serial queue and output service |
+| `settings_service.h/.cpp` | Retained settings schema, validation and persistence |
+| `payload_service.h/.cpp` | Retained sensor encoders and command decoder |
+| `sensor_service.h/.cpp` | Retained acquisition backend and disabled sensor interface |
+
+`config.h`, `log_config.h` and `firmware_features.h` remain configuration
+headers. The radio beta defaults to `SENSOR_SERVICE_ENABLED=0` in
+`firmware_features.h`; the sensor interface returns false without initializing
+a bus or requiring the BME library. Setting it to 1 compiles the retained I2C
+backend for future development. The Hello World application continues to bypass
+sensor acquisition, saved settings and environmental encoding. Sensor interface
+selection and hardware validation remain part of later sensor development.
+
 ## Serial output
 
 All firmware-owned output uses `log_service.h` and the shared implementation in
@@ -239,6 +267,7 @@ range; normal network ADR remains enabled.
 ```sh
 python3 tests/check_logic.py
 python3 tests/check_logging.py
+python3 tests/check_modules.py
 bash tools/check-board.sh
 ```
 
@@ -333,6 +362,14 @@ Set `LOGIC_LOG_LEVEL` to a value from 0 through 5 to check any of the six levels
 including ERROR and WARN without expecting compiled-out INFO congestion. Optional
 `LOGGING_SANITIZERS=1` enables address/undefined-behavior instrumentation for the
 focused serial checks.
+Module checks compile public headers independently and include them from two
+consumers. They link the production `.cpp` files separately with fake hardware,
+checking shared state, the journal copy API, EEPROM initialization, settings and
+payload compatibility, the disabled sensor interface, and Arduino setup/loop
+behavior. A separate opt-in sensor build checks the retained backend against a
+fake BME library; it does not establish correct wiring or real sensor operation.
+Host checks use a staged, non-secret configuration. `MODULE_SANITIZERS=1` adds
+address/undefined-behavior instrumentation to the module-link checks.
 
 ## Bench check
 

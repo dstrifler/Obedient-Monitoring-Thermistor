@@ -1,9 +1,7 @@
-#ifndef _EEPROM_SERVICE_H
-#define _EEPROM_SERVICE_H
+#ifndef EEPROM_SERVICE_H
+#define EEPROM_SERVICE_H
 
-#include <Arduino.h>
 #include <RadioLib.h>
-#include <EEPROM.h>
 
 // Total EEPROM reservation
 #define EEPROM_TOTAL_BYTES 512
@@ -45,19 +43,6 @@
 #define SETTINGS_MAGIC                0x47534150UL   // "GSAP"
 #define SETTINGS_VERSION              2
 
-static inline bool eepromBootstrap()
-{
-  static bool isInitialized = false;
-  if(isInitialized) {
-    return true;
-  }
-
-  if(EEPROM.init() != 0) {
-    return false;
-  }
-  EEPROM.setLength(EEPROM_TOTAL_BYTES);
-  isInitialized = true;
-  return true;
-}
+bool eepromBootstrap();
 
 #endif

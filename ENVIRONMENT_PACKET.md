@@ -5,8 +5,8 @@ It replaces Hello World. It starts 60 seconds after a successful OTAA activation
 returns, including after radio recovery, then uses the existing one-minute
 cadence and airtime/retry handling. Saved report interval, field selection,
 units, payload-mode settings, and application downlink commands remain bypassed
-while testing. The Helium decoder will be implemented separately from this
-board-side change.
+while testing. The paste-ready console decoder is
+[decoders/environment_v1.js](decoders/environment_v1.js).
 
 ## Byte layout
 
@@ -60,6 +60,45 @@ These bytes are incompatible with the historical 14-byte settings-dependent
 binary encoder and with Hello World's ASCII bytes. No new checksum, timestamp,
 or sequence counter is included; LoRaWAN and the network supply integrity,
 frame counters, and reception timestamps.
+
+## Console decoder installation
+
+Copy the entire contents of [decoders/environment_v1.js](decoders/environment_v1.js)
+into the console's custom JavaScript decoder and save/attach it to this device.
+The script provides Helium Console's `Decoder(bytes, port, uplink_info)` entry point and
+ChirpStack's `decodeUplink(input)` entry point, so use the same complete file
+with either interface. ChirpStack's codec is configured in Device profiles ->
+Codec -> JavaScript functions. Helium Console custom functions must be attached
+to the device/integration flow to run on subsequent packets.
+
+For test hex `1f09dd13bac38e00003039`, select FPort 1 and expect:
+
+```json
+{
+  "format_version": 1,
+  "valid_mask": 15,
+  "temperature_c": 25.25,
+  "humidity_pct": 50.5,
+  "pressure_pa": 100124,
+  "pressure_hpa": 1001.24,
+  "gas_ohms": 12345
+}
+```
+
+Unavailable fields are `null`; valid zero values remain zero. The decoder
+recognizes an empty FPort 0 MAC-only message as `{ "mac_only": true }` without
+inventing environmental readings. Other wrong ports/lengths, unsupported
+versions (including old Hello World), and malformed bytes are rejected.
+`Decoder` throws an error; `decodeUplink` returns an `errors` array. The script
+uses no Node.js APIs or external libraries. Unit conversion does not claim
+extra sensor accuracy, and gas resistance remains raw ohms.
+
+Run `python3 tests/check_decoder.py` with Node.js and g++ installed to check
+both entry points against actual firmware-encoded packets, all validity masks,
+negative/zero values, unsigned gas boundaries, and malformed input handling.
+
+Interface references: [Helium decoder examples](https://github.com/helium/console-decoders)
+and [ChirpStack codec documentation](https://www.chirpstack.io/docs/chirpstack/use/device-profiles.html#javascript-functions).
 
 ## Acquisition and radio behavior
 

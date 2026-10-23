@@ -825,7 +825,14 @@ int main() {
 
 # Use unchanged upstream payload arithmetic, validation and public setDatarate
 # with the actual firmware capacity selector. Modem/MAC application is faked.
-capacity_fixture = STOCK_FAKE.replace('struct LoRaWANChannel_t {};', r'''
+capacity_fixture = STOCK_FAKE.replace(
+    'int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) { return 0; }', r'''
+ unsigned phyConfigurations=0,failPhyConfiguration=0;
+ int16_t setPhyProperties(LoRaWANChannel_t*,uint8_t,int) {
+  ++phyConfigurations;
+  return phyConfigurations==failPhyConfiguration?RADIOLIB_ERR_SPI_CMD_TIMEOUT:0;
+ }
+''').replace('struct LoRaWANChannel_t {};', r'''
 struct LoRaWANChannel_t { bool enabled=false;uint8_t dr=0,drMin=0,drMax=1; };
 ''').replace('struct Band { uint8_t bandNum=1; };', r'''
 struct Band {
@@ -888,6 +895,25 @@ int main() {
  gSchedulerState=SCHED_SEND_UPLINK;gCapacityFailures=0;gCapacityRatesTried=0;
  unsigned rfBefore=gRadio.uplinkCalls;advance(121000);
  assert(gSchedulerState==SCHED_FAULT && gRadio.uplinkCalls==rfBefore);
+}
+''')
+
+run('serial_level_preserves_radio_operations', capacity_integration + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ assert(lwIsActivated() && gRadio.uplinkCalls==1);
+ unsigned before=gRadio.uplinkCalls;
+ gNode.phyConfigurations=0;gNode.failPhyConfiguration=2;
+ gSchedulerState=SCHED_SEND_UPLINK;gNextSchedulerTickMs=ticks;
+ // One capacity query and one transmit configuration at every output level.
+ // A logging-only query would consume this failure and hide it from the app.
+ loop();
+ assert(gNode.phyConfigurations==2 && gRadio.uplinkCalls==before);
+ assert(gUplinkHardwareFailures==1 && gSchedulerState==SCHED_WAIT_FOR_REPORT);
+ gNode.failPhyConfiguration=0;advance(6000);
+ assert(gRadio.uplinkCalls==before+1 && gNode.phyConfigurations==4);
+ assert(gUplinkHardwareFailures==0);
 }
 ''')
 
@@ -1239,9 +1265,11 @@ void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)
 int main() {
  Serial.ready=false;setup();advance(185000);
  assert(joins==1 && sends.size()==4 && Serial.output.empty());
-#if FW_LOG_LEVEL != FW_LOG_LEVEL_OFF
+#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
  for(unsigned i=0;i<20;++i) { LOG_INFO("Pressure", "Pending %u", i); }
  assert(logDroppedCount(LogLevel::INFO)>0);
+#else
+ assert(logDroppedCount(LogLevel::INFO)==0);
 #endif
  // Full/unwritable serial output must not delay faults or radio policy, and
  // critical messages must survive INFO pressure until the UART becomes ready.
@@ -1251,7 +1279,12 @@ int main() {
 #if FW_LOG_LEVEL != FW_LOG_LEVEL_OFF
  assert(Serial.output.find("[ERROR][App] Injected failure\r\n")!=std::string::npos);
  assert(Serial.output.find("[ERROR][Fault] Radio work paused;")!=std::string::npos);
- assert(Serial.output.find("Dropped totals:")!=std::string::npos && sends.size()==before);
+#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
+ assert(Serial.output.find("Dropped totals:")!=std::string::npos);
+#else
+ assert(Serial.output.find("Dropped totals:")==std::string::npos);
+#endif
+ assert(sends.size()==before);
 #else
  assert(Serial.output.empty() && sends.size()==before);
 #endif

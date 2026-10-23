@@ -311,10 +311,6 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   LoRaWANEvent_t eventUp = {};
   LoRaWANEvent_t eventDown = {};
 
-  LOG_DEBUG("LoRaWAN", "Uplink preflight: max_payload=%u bytes=%u",
-    unsigned(lwMaxPayloadBytes()), unsigned(lenUp));
-
-
   if(millis() < started || lwTimerRolloverPending()) { return LW_ERR_TIMER_ROLLOVER; }
 
   int16_t state = gNode.sendReceive(

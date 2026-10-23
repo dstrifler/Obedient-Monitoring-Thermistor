@@ -108,7 +108,7 @@ HARNESS = r'''
 SPIClass SPI,SPI1;
 uint32_t regs[7]={};uint64_t enabled=0,pending=0;unsigned critical=0,callbacks=0;
 uint32_t ticks=0,txStart=0;bool transmitting=false,physicalDio=false,rfSent=false;
-unsigned unrelatedAttaches=0,unrelatedDetaches=0;uint64_t touched=0;bool irqWasCreated=false;
+unsigned unrelatedAttaches=0,unrelatedDetaches=0;uint64_t touched=0;bool irqWasCreated=false,expectDio1Masked=false;
 uint32_t injectedStatus=0;unsigned configCalls=0;uint32_t lastPad=0;
 void (*handlers[50])()={};bool pinInput[50]={};
 struct Registers{uint32_t PADKEY=0;} gpio;
@@ -141,11 +141,13 @@ uint32_t am_hal_gpio_pinconfig(uint32_t pin,am_hal_gpio_pincfg_t cfg){
  if(injectedStatus)return injectedStatus;
  pinInput[pin]=true;regs[pin/8]&=~(15U<<((pin%8)*4));return 0;
 }
-void pinMode(uint32_t pin,uint32_t mode){if(pin<50)pinInput[pin]=mode==INPUT;}
+void pinMode(uint32_t pin,uint32_t mode){assert(critical==0);if(pin<50)pinInput[pin]=mode==INPUT;}
 void digitalWrite(uint32_t,uint32_t){}
 uint32_t digitalRead(uint32_t pin){return pin<50 && readable(pin) && physicalDio;}
 void attachInterrupt(uint32_t pin,void(*cb)(),uint32_t mode){
+ assert(critical==0); // Real Arduino registration can allocate and lock RTOS mutexes.
  if(pin!=40){++unrelatedAttaches;return;}
+ if(expectDio1Masked)assert(!(enabled & (uint64_t(1)<<40)));
  // Matches indexAttachInterruptParam's detach followed by rise/fall setup.
  detachInterrupt(pin);handlers[pin]=cb;
  if(!irqWasCreated){irqWasCreated=true;enabled|=uint64_t(1)<<pin;}
@@ -154,7 +156,9 @@ void attachInterrupt(uint32_t pin,void(*cb)(),uint32_t mode){
  else{gpio_irq_set(&irq,IRQ_RISE,1);gpio_irq_set(&irq,IRQ_FALL,1);}
 }
 void detachInterrupt(uint32_t pin){
+ assert(critical==0); // Keep stock callback teardown outside global critical sections.
  if(pin!=40){++unrelatedDetaches;return;}
+ if(expectDio1Masked)assert(!(enabled & (uint64_t(1)<<40)));
  handlers[pin]=nullptr;gpio_irq_set(&irq,IRQ_RISE,0);gpio_irq_set(&irq,IRQ_FALL,0);
 }
 void delay(unsigned long ms){ticks+=ms;}void delayMicroseconds(unsigned long us){ticks+=us/1000;}
@@ -193,6 +197,7 @@ int main(){
  assert(radio.transmit(data,24)==RADIOLIB_ERR_TX_TIMEOUT && rfSent);
  std::cout<<"PASS: negative control reproduces post-RX timeout with stock Arduino HAL\n";
  Apollo3RadioHal fixed(SPI1,40,40);module.hal=&fixed;
+ irqWasCreated=false;expectDio1Masked=true; // Exercise first allocation through the adapter too.
  fixed.init();fixed.pinMode(40,INPUT);
  assert(fixed.status()==0 && readable(40) && !(enabled & (uint64_t(1)<<40)));
  for(unsigned cycle=0;cycle<100;++cycle){
@@ -217,7 +222,7 @@ int main(){
  fixed.attachInterrupt(40,received,RISING);count=callbacks;
  fixed.init();fixed.pinMode(40,INPUT);fireReceive();assert(callbacks==count && !(enabled & (uint64_t(1)<<40)));
  fixed.attachInterrupt(40,received,RISING);fireReceive();assert(callbacks==count+1);fixed.detachInterrupt(40);
- std::cout<<"PASS: callbacks detach cleanly; unrelated and NC pins do not receive Apollo3 reconfiguration\n";
+ std::cout<<"PASS: callback management runs outside critical sections with DIO1 masked; unrelated and NC pins preserved\n";
  fixed.spiBeginTransaction();uint8_t out[]={1,2},in[2]={};fixed.spiTransfer(out,2,in);fixed.spiEndTransaction();
  assert(SPI1.transactions==1 && SPI.transactions==0 && SPI1.last.clock==2000000 && SPI1.last.mode==SPI_MODE0);
  assert(in[0]==254 && in[1]==253);fixed.delay(7);assert(fixed.millis()==ticks && fixed.micros()==ticks*1000);

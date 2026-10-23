@@ -21,6 +21,10 @@ are logged but ignored, keeping the text and successful-report cadence fixed.
   receive callback. Only DIO1 gets this handling. SPI1 configuration, timeouts,
   oscillator selection, RF switching and the default 10-ms scan guard retain
   their stock behavior. RadioLib and the Arduino core are unchanged.
+  Only the direct Ambiq GPIO operations run inside short critical sections.
+  Arduino callback registration/removal runs outside them, with DIO1 masked
+  before those calls: first registration can allocate an `InterruptIn` object
+  and use RTOS mutexes, which Mbed forbids while interrupts are globally masked.
   GPIO setup errors latch until radio initialization; join/data wrappers report
   the local error `-31997` and stop transactions instead of repeatedly retrying
   a known GPIO configuration failure. An accepted JoinNonce is still saved if
@@ -414,7 +418,10 @@ against simulated registers. A negative control reproduces `-5` after receive
 interrupt detachment despite simulated RF delivery; the adapter then completes
 100 TX/RX/detach cycles with repeated initialization, verifies working receive
 callbacks, detached IRQ masking, unrelated pins, SPI1/timing delegation and
-latched GPIO failures. These checks require the installed RadioLib and Apollo3
+latched GPIO failures. The Arduino API fakes also reject callback management
+inside global critical sections and verify that DIO1 is masked on entry,
+including first callback allocation. These checks require the installed
+RadioLib and Apollo3
 core used by the board build (`RADIOLIB_UPSTREAM` and `APOLLO3_CORE` can override
 their paths). They do not replace a physical-board test: after flashing, verify
 multiple consecutive Hello World uplinks with increasing frame counters and

@@ -22,6 +22,10 @@ static constexpr uint16_t HEATER_TEMPERATURE_C = 300;
 static constexpr uint16_t HEATER_DURATION_MS = 100;
 static constexpr uint32_t SAMPLE_INTERVAL_MS = 60000;
 static constexpr uint32_t DATA_READY_GRACE_MS = 1000;
+static constexpr uint32_t SAMPLE_MAX_AGE_MS = 65000;
+static SensorData gLatestSample = {};
+static bool gHaveLatestSample = false;
+static uint32_t gLatestSampleMs = 0;
 
 enum SensorState : uint8_t { SENSOR_STOPPED, SENSOR_START, SENSOR_WAIT, SENSOR_COOLDOWN };
 static SensorState gSensorState = SENSOR_STOPPED;
@@ -32,12 +36,14 @@ static bool sensorFailure(const char* operation) {
   (void)operation;
   gSensorPresent = false;
   gMeasurementPending = false;
+  gHaveLatestSample = false;
   return false;
 }
 
 bool sensorBegin() {
   gSensorPresent = false;
   gMeasurementPending = false;
+  gHaveLatestSample = false;
 #if defined(SENSOR_USE_WIRE1) && (SENSOR_USE_WIRE1 == 1)
   if(!gWireStarted) { Wire1.begin(); gWireStarted = true; }
   gBme.begin(SENSOR_I2C_ADDR, Wire1);
@@ -61,6 +67,7 @@ bool sensorTrigger() {
   if(tphUs == 0 || tphUs > 1000000UL) {
     LOG_WARN("Sensor", "Invalid measurement duration; retry in 60 seconds.");
     gSensorPresent = false;
+    gHaveLatestSample = false;
     return false;
   }
   // Bosch's duration covers T/P/H only; add the programmed gas-heater time.
@@ -90,6 +97,7 @@ bool sensorFetch(SensorData* data) {
       LOG_WARN("Sensor", "Measurement timed out without fresh data; retry in 60 seconds.");
       gSensorPresent = false;
       gMeasurementPending = false;
+      gHaveLatestSample = false;
     }
     return false;
   }
@@ -100,6 +108,7 @@ bool sensorFetch(SensorData* data) {
     LOG_WARN("Sensor", "Invalid T/P/H reading discarded; retry in 60 seconds.");
     gSensorPresent = false;
     gMeasurementPending = false;
+    gHaveLatestSample = false;
     return false;
   }
 
@@ -114,10 +123,22 @@ bool sensorFetch(SensorData* data) {
   if(sample.gasValid) { sample.gasOhms = uint32_t(raw.gas_resistance); }
   *data = sample;
   gMeasurementPending = false;
+  gLatestSample = sample;
+  // Forced-mode data can remain in the chip across a long blocking radio
+  // call. Age from estimated conversion completion, not delayed collection.
+  gLatestSampleMs = gMeasurementStartedMs + gMeasurementWaitMs;
+  gHaveLatestSample = true;
   return true;
 }
 
 bool sensorPresent() { return gSensorPresent; }
+
+bool sensorLatest(SensorData* data) {
+  if(data == nullptr || !gHaveLatestSample || !gSensorPresent ||
+     uint32_t(millis() - gLatestSampleMs) > SAMPLE_MAX_AGE_MS) { return false; }
+  *data = gLatestSample;
+  return true;
+}
 
 static void logSample(const SensorData& sample) {
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
@@ -181,5 +202,6 @@ void sensorPoll() {}
 bool sensorBegin() { return false; }
 bool sensorTrigger() { return false; }
 bool sensorFetch(SensorData*) { return false; }
+bool sensorLatest(SensorData*) { return false; }
 bool sensorPresent() { return false; }
 #endif

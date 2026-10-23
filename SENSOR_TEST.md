@@ -1,10 +1,11 @@
-# Waveshare BME688 serial bench test
+# Waveshare BME688 bench test
 
-Sensor diagnostics are enabled by default. The existing radio test still sends
-the 11 ASCII bytes `Hello World` on FPort 1, starting 60 seconds after OTAA
-activation returns and repeating on its existing schedule. Environmental data
-is printed through the shared Serial logger only. Saved application settings,
-sensor payload encoding, and application downlink commands remain bypassed.
+Sensor diagnostics are enabled by default. The radio sends a fixed 11-byte
+environmental packet on FPort 1, starting 60 seconds after OTAA activation
+returns and repeating on its existing schedule. Environmental data is also
+printed through the shared Serial logger. Saved application settings and
+application downlink commands remain bypassed. See
+[ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md) for the byte layout.
 
 ## Wiring
 
@@ -65,7 +66,8 @@ No sensor activity starts if clock/EEPROM startup fails before sensor startup.
 
 To build the radio-only fallback, set `SENSOR_SERVICE_ENABLED=0` in
 `firmware_features.h`, or use `THERMISTOR_SENSOR_ENABLED=0` with the board script.
-That build does not require the Bosch library or initialize the sensor bus.
+That build does not require the Bosch library or initialize the sensor bus;
+it transmits full-length packets with all validity flags cleared.
 
 ## Validation
 
@@ -83,11 +85,11 @@ a simulated lower sensor API, then link the real sensor monitor, logger, and
 application state machine. They cover forced-mode `getData()` returning zero,
 measurement/heater timing, status errors, readiness/timeout/retry, gas flags,
 invalid numbers, timer wrap, negative temperature formatting, missing hardware,
-UART backpressure, and unchanged Hello World timing/payloads at OFF/INFO/TRACE.
+UART backpressure, sample freshness, fixed environmental bytes, MAC-only
+deferral, and preserved one-minute radio cadence at OFF/INFO/TRACE.
 The board build also compiles Bosch's real lower C API. Physical measurements,
 sensor disconnection/reconnection, and continued Helium delivery still require
 bench verification.
 
-Environmental payload integration is a later step: the retained all-fields
-binary encoding occupies 14 bytes, exceeding the current US915 DR0 application
-capacity of 11 bytes before pending MAC overhead. This test does not send it.
+The historical settings-dependent all-fields encoder still occupies 14 bytes.
+The active test uses the fixed 11-byte encoder documented in ENVIRONMENT_PACKET.md.

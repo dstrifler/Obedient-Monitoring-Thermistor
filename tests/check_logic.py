@@ -36,6 +36,7 @@ COMMON = r'''
 #include <cstdio>
 #include <cstdarg>
 #include <string>
+#include <math.h>
 constexpr int16_t LW_ERR_RADIO_GPIO=-31997;
 bool radioHalHealthy=true;
 bool lwRadioHalHealthy(){return radioHalHealthy;}
@@ -63,6 +64,18 @@ for name in ['log_config.h', 'log_service.h', 'log_service.cpp']:
     COMMON += re.sub(r'^#include .*\n', '', (ROOT / name).read_text(), flags=re.M)
 COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.h').read_text(), flags=re.M)
 COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.cpp').read_text(), flags=re.M)
+COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'sensor_service.h').read_text(), flags=re.M)
+COMMON += 'struct AppSettings;\n'
+COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'payload_service.h').read_text(), flags=re.M)
+payload_source = (ROOT / 'payload_service.cpp').read_text()
+COMMON += payload_source[payload_source.index('static void payloadWriteU16BE'):
+                         payload_source.index('// COMPACT BINARY ENCODER')].rsplit('// ============================================================', 1)[0]
+COMMON += r'''
+bool sensorLatest(SensorData* out) {
+ if(!out)return false;
+ *out=SensorData{25.25f,50.5f,100123,12345,true};return true;
+}
+'''
 
 # Exercise the journal implementation itself with flash that can lose power
 # during body programming, commit programming, or page erasure.
@@ -189,7 +202,8 @@ bool lwTryCapacityDataRate(size_t,uint16_t& tried) {
  return true;
 }
 int16_t lwSendReceive(const uint8_t* data,size_t size,uint8_t*,size_t* received) {
- assert(activated); assert(*received==0); assert(size==0 || (size==11 && memcmp(data,"Hello World",11)==0));
+ const uint8_t expected[]={0x1f,0x09,0xdd,0x13,0xba,0xc3,0x8e,0,0,0x30,0x39};
+ assert(activated); assert(*received==0); assert(size==0 || (size==11 && memcmp(data,expected,11)==0));
  sends.push_back(ticks); lengths.push_back(size);
  *received=0;
  if(waitAfterSend) { forcedWait=waitAfterSend; }

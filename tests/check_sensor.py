@@ -62,6 +62,7 @@ FIXTURE = r'''
 #include "app_service.h"
 #include "lorawan_service.h"
 #include "log_service.h"
+#include "payload_service.h"
 #include <vector>
 #include <cstring>
 #include <limits>
@@ -71,7 +72,7 @@ unsigned long millis(){return ticks;}unsigned long micros(){return uint32_t(tick
 void delay(unsigned long ms){ticks+=ms;}
 void delayMicroseconds(unsigned long us){ticks+=(us+999)/1000;}
 unsigned initializations=0,triggers=0,fetches=0;
-int failAt=0;bool fields=true;uint32_t triggeredAt=0;
+int failAt=0;bool fields=true,varyReading=false;uint32_t triggeredAt=0;
 bme68xData reading{};
 void goodReading(){
  reading={};reading.temperature=25.25f;reading.humidity=50.5f;reading.pressure=100123;
@@ -105,11 +106,14 @@ int8_t bme68x_set_op_mode(uint8_t mode,bme68x_dev*){
 }
 int8_t bme68x_get_data(uint8_t mode,bme68xData* out,uint8_t* count,bme68x_dev*){
  assert(!inRadio && mode==BME68X_FORCED_MODE && uint32_t(ticks-triggeredAt)>=151);++fetches;
+ if(varyReading)reading.temperature=20.0f+float(fetches)/100.0f;
  *count=fields?1:0;*out=reading;
  return failAt==6?BME68X_E_COM_FAIL:(fields?BME68X_OK:BME68X_W_NO_NEW_DATA);
 }
 }
 bool active=false;unsigned joins=0;uint32_t joinedAt=0;std::vector<uint32_t> sends;
+size_t capacity=11;bool macTest=false,stopSensor=false;
+std::vector<std::vector<uint8_t>> packets;
 bool clockBegin(){return true;}bool eepromBootstrap(){return true;}
 bool lwBegin(){return true;}bool lwIsActivated(){return active;}
 int16_t lwRestore(){return 0;}bool lwPersistenceHealthy(){return true;}
@@ -118,11 +122,27 @@ int16_t lwLastActivationState(){return 0;}
 bool lwActivate(){
  inRadio=true;ticks+=6500;inRadio=false;++joins;active=true;joinedAt=ticks;return true;
 }
-size_t lwMaxPayloadBytes(){return 11;}uint32_t lwTimeUntilUplink(){return 0;}
+size_t lwMaxPayloadBytes(){return capacity;}uint32_t lwTimeUntilUplink(){return 0;}
 bool lwTryCapacityDataRate(size_t,uint16_t&){return false;}
 int16_t lwSendReceive(const uint8_t* p,size_t n,uint8_t*,size_t* received){
- assert(active && n==11 && memcmp(p,"Hello World",11)==0);
+ assert(active && (n==11 || (macTest && n==0)));
+ if(n){
+  assert((p[0]>>4)==1);
+  if(failAt==1 || (stopSensor && sends.size()>=1)){
+   assert(p[0]==0x10);for(size_t i=1;i<n;++i)assert(p[i]==0);
+  }else{
+   assert((p[0]&7)==7);
+   int16_t temperature=int16_t((uint16_t(p[1])<<8)|p[2]);
+   assert(temperature==lroundf(reading.temperature*100));
+   assert(p[3]==0x13 && p[4]==0xba && p[5]==0xc3 && p[6]==0x8e);
+   if(reading.status&BME68X_GASM_VALID_MSK)assert(p[0]==0x1f && p[9]==0x30 && p[10]==0x39);
+   else {assert(p[0]==0x17);for(size_t i=7;i<n;++i)assert(p[i]==0);}
+  }
+ }
  assert(uint32_t(ticks-joinedAt)>=60000);sends.push_back(ticks);
+ packets.emplace_back(p,p+n);
+ if(macTest && sends.size()==2)capacity=11;
+ if(stopSensor)fields=false;
  inRadio=true;ticks+=2100;inRadio=false;*received=0;return 0;
 }
 void drain(){for(unsigned i=0;i<100;++i)logPump();}
@@ -135,13 +155,14 @@ void convert(){assert(sensorBegin() && sensorTrigger());ticks+=151;}
 int main(int argc,char** argv){
  assert(argc==2);std::string test=argv[1];goodReading();logBegin(115200);
  if(test=="forced_sample"){
-  SensorData out=sentinel();assert(!sensorFetch(&out) && !sensorFetch(nullptr) && !sensorTrigger());unchanged(out);
+  SensorData out=sentinel();assert(!sensorFetch(&out) && !sensorLatest(&out) && !sensorLatest(nullptr) && !sensorFetch(nullptr) && !sensorTrigger());unchanged(out);
   assert(sensorBegin() && sensorPresent() && ticks==0 && triggers==0);
   assert(Wire1.begins==1 && Wire.begins==0 && Wire1.address==0x77);
   assert(sensorTrigger() && !sensorTrigger() && ticks==0);
   ticks=150;assert(!sensorFetch(&out) && fetches==0);unchanged(out);
   ++ticks;assert(sensorFetch(&out) && fetches==1);
   assert(out.temperatureC==25.25f && out.humidityPct==50.5f && out.pressurePa==100123 && out.gasOhms==12345 && out.gasValid);
+  SensorData latest{};assert(sensorLatest(&latest) && latest.temperatureC==25.25f);
   assert(!sensorFetch(&out) && sensorBegin() && Wire1.begins==1);
  }else if(test=="ready_timeout_retry"){
   fields=false;sensorStart();sensorPoll();assert(triggers==1);
@@ -191,15 +212,32 @@ int main(int argc,char** argv){
   ++ticks;sensorPoll();assert(triggers==2);
   ticks+=151;sensorPoll();ticks+=600000;sensorPoll();assert(triggers==3);
   ticks+=151;sensorPoll();sensorPoll();assert(triggers==3);
- }else if(test=="app_healthy" || test=="app_sensor_absent" || test=="app_uart_blocked"){
+ }else if(test=="sample_cache"){
+  ticks=UINT32_MAX-100;convert();SensorData out{};assert(sensorFetch(&out));
+  ticks+=65000;assert(sensorLatest(&out) && out.temperatureC==25.25f);
+  ++ticks;out=sentinel();assert(!sensorLatest(&out));unchanged(out);
+  convert();assert(sensorFetch(&out) && sensorLatest(&out));
+  assert(sensorTrigger());ticks+=151;failAt=6;assert(!sensorFetch(&out));
+  out=sentinel();assert(!sensorLatest(&out));unchanged(out);
+ }else if(test=="old_conversion"){
+  convert();ticks+=90000;SensorData out{};assert(sensorFetch(&out));
+  assert(!sensorLatest(&out));
+ }else if(test=="app_healthy" || test=="app_sensor_absent" || test=="app_uart_blocked" ||
+          test=="app_mac_only" || test=="app_sensor_stops" || test=="app_gas_unavailable"){
+  varyReading=true;
   if(test=="app_sensor_absent")failAt=1;
   if(test=="app_uart_blocked")Serial.ready=false;
+  if(test=="app_mac_only"){macTest=true;capacity=0;}
+  if(test=="app_sensor_stops")stopSensor=true;
+  if(test=="app_gas_unavailable")reading.status&=~BME68X_GASM_VALID_MSK;
   appSetup();advance(310000);
   assert(joins==1 && sends.size()==5);
   assert(sends.front()-joinedAt>=60000 && sends.front()-joinedAt<=60100);
   for(size_t i=1;i<sends.size();++i)assert(sends[i]-sends[i-1]>=60000 && sends[i]-sends[i-1]<=60200);
   if(failAt)assert(triggers==0 && initializations>=5 && initializations<=6);
-  else assert(fetches>=5 && triggers>=5 && sensorPresent());
+  else if(!stopSensor)assert(fetches>=5 && triggers>=5 && sensorPresent());
+  if(macTest)assert(packets[0].empty() && packets[1].empty() && packets[2].size()==11);
+  if(test=="app_healthy")assert(packets.front()!=packets.back());
  }else assert(false);
 }
 '''
@@ -224,15 +262,16 @@ with tempfile.TemporaryDirectory(prefix='thermistor-sensor-') as tmp:
     program = folder / 'sensor'
     cases = ['forced_sample', 'ready_timeout_retry', 'init_errors', 'numeric_validation',
              'gas_validity', 'stale_data', 'rollover_and_logs',
-             'app_healthy', 'app_sensor_absent', 'app_uart_blocked']
+             'sample_cache', 'old_conversion', 'app_healthy', 'app_sensor_absent', 'app_uart_blocked',
+             'app_mac_only', 'app_sensor_stops', 'app_gas_unavailable']
     for level in (0, 3, 5):
         subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
                         '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
                         '-DARDUINO=10819', '-DFW_LOG_LEVEL=' + str(level),
                         '-I', str(folder), '-I', str(folder / 'bosch'),
                         *[str(folder / name) for name in ['sensor_service.cpp', 'app_service.cpp',
-                          'lorawan_timer.cpp', 'log_service.cpp', 'bosch/bme68xLibrary.cpp', 'fixture.cpp']],
+                          'lorawan_timer.cpp', 'log_service.cpp', 'payload_service.cpp', 'bosch/bme68xLibrary.cpp', 'fixture.cpp']],
                         '-o', str(program)], check=True)
         for case in cases:
             subprocess.run([str(program), case], check=True)
-        print('PASS: 10 sensor/real-Bosch-wrapper and app integration scenarios at log level', level, flush=True)
+        print('PASS:', len(cases), 'sensor/real-Bosch-wrapper and app integration scenarios at log level', level, flush=True)

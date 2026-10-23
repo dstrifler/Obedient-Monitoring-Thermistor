@@ -122,7 +122,8 @@ int16_t lwLastActivationState(){return 0;}bool lwPersistenceHealthy(){return tru
 size_t lwMaxPayloadBytes(){return 11;}uint32_t lwTimeUntilUplink(){return 0;}
 bool lwTryCapacityDataRate(size_t,uint16_t&){return false;}
 int16_t lwSendReceive(const uint8_t* data,size_t size,uint8_t*,size_t* received){
- assert(active && size==11 && memcmp(data,"Hello World",11)==0);*received=0;sends.push_back(fakeMs);return sendResult;
+ const uint8_t unavailable[]={0x10,0,0,0,0,0,0,0,0,0,0};
+ assert(active && size==11 && memcmp(data,unavailable,11)==0);*received=0;sends.push_back(fakeMs);return sendResult;
 }
 '''
 HEADERS = ['app_service.h', 'clock_service.h', 'eeprom_service.h', 'firmware_features.h',
@@ -140,6 +141,7 @@ MAIN = INCLUDES + r'''
 #include "EEPROM.h"
 #include <vector>
 #include <cstring>
+#include <cmath>
 extern unsigned flashInstances,joins;extern bool active;extern int16_t sendResult;
 extern std::vector<uint32_t> sends;
 bool bootstrapOther();AppSettings* settingsOther();void changeOther();bool loadOther(uint8_t*,size_t);
@@ -154,11 +156,33 @@ int main(){
  settingsSave();settingsSetReportInterval(60);settingsLoad();assert(settingsGet()->reportIntervalMin==30);
  settingsResetDefaults();SensorData data{25.0f,50.0f,100000.0f,1234,true};
  sensorStart();sensorPoll();
- assert(!sensorBegin() && !sensorTrigger() && !sensorFetch(&data) && !sensorPresent());
+ assert(!sensorBegin() && !sensorTrigger() && !sensorFetch(&data) && !sensorLatest(&data) && !sensorPresent());
  assert(data.temperatureC==25.0f && data.gasOhms==1234);
  uint8_t payload[256];assert(payloadEncodeUplink(payload,sizeof(payload),&data,settingsGet())==14);
  assert(payload[0]==1 && payload[1]==15 && payload[2]==0x09 && payload[3]==0xc4);
  assert(payloadEncodeUplink(payload,13,&data,settingsGet())==0);
+ // Fixed wire contract: exact bytes, signed temperature, pressure rounding,
+ // invalid slots, high-bit gas values, and no write on insufficient capacity.
+ data=SensorData{25.25f,50.5f,100123,12345,true};
+ const uint8_t expected[]={0x1f,0x09,0xdd,0x13,0xba,0xc3,0x8e,0,0,0x30,0x39};
+ assert(payloadEncodeEnvironment(payload,sizeof(payload),&data)==11 && memcmp(payload,expected,11)==0);
+ memset(payload,0xaa,sizeof(payload));assert(payloadEncodeEnvironment(payload,10,&data)==0);
+ for(uint8_t b:payload)assert(b==0xaa);
+ assert(payloadEncodeEnvironment(nullptr,11,&data)==0);
+ assert(payloadEncodeEnvironment(payload,11,nullptr)==11 && payload[0]==0x10);
+ for(size_t i=1;i<11;++i)assert(payload[i]==0);
+ data=SensorData{-0.25f,100,110000,0xf1234567U,true};
+ assert(payloadEncodeEnvironment(payload,11,&data)==11);
+ const uint8_t upper[]={0x1f,0xff,0xe7,0x27,0x10,0xd6,0xd8,0xf1,0x23,0x45,0x67};
+ assert(memcmp(payload,upper,11)==0);
+ data=SensorData{-40,0,30000,1,true};payloadEncodeEnvironment(payload,11,&data);
+ const uint8_t lower[]={0x1f,0xf0,0x60,0,0,0x3a,0x98,0,0,0,1};
+ assert(memcmp(payload,lower,11)==0);
+ data=SensorData{NAN,101,INFINITY,12345,false};payloadEncodeEnvironment(payload,11,&data);
+ assert(payload[0]==0x10);for(size_t i=1;i<11;++i)assert(payload[i]==0);
+ data=SensorData{85,50,100000,0,true};payloadEncodeEnvironment(payload,11,&data);
+ assert(payload[0]==0x17 && payload[1]==0x21 && payload[2]==0x34);
+ for(size_t i=7;i<11;++i)assert(payload[i]==0);
  uint8_t command[]={CMD_SET_REPORT_INTERVAL,30};assert(payloadDecodeDownlink(command,2).valid);
  command[1]=31;assert(!payloadDecodeDownlink(command,2).valid);
  uint8_t nonces[18]={1},loaded[18]={};

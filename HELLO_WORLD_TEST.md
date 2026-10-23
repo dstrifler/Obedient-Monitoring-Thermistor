@@ -1,10 +1,11 @@
-# Temporary Hello World uplink test
+# Environmental uplink test and firmware architecture
 
-The sketch bypasses sensor encoders and saved application settings. BME688
-acquisition now runs alongside the radio test for Serial diagnostics; see
-[SENSOR_TEST.md](SENSOR_TEST.md) for wiring, the Bosch dependency, and behavior.
-Application commands are logged but ignored, keeping the text and
-successful-report cadence fixed.
+Hello World has been replaced by a fixed 11-byte environmental packet; see
+[ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md) for its byte layout and behavior.
+The sketch bypasses historical settings-dependent encoders and saved application
+settings. See [SENSOR_TEST.md](SENSOR_TEST.md) for wiring and the Bosch dependency.
+Application commands are logged but ignored during this fixed-cadence test.
+This document retains its historical filename for existing links.
 
 - Board: SparkFun LoRa Thing Plus expLoRaBLE (Apollo3).
 - Radio oscillator: the NM180100's SX1262 uses a 32 MHz crystal (module
@@ -32,8 +33,9 @@ successful-report cadence fixed.
   a known GPIO configuration failure. An accepted JoinNonce is still saved if
   a GPIO cleanup failure follows successful activation.
 - FPort: `LORA_UPLINK_FPORT` (currently 1).
-- Payload: exactly 11 ASCII bytes, `Hello World`, without a trailing NUL.
-- Expected hex: `48656c6c6f20576f726c64`.
+- Payload: exactly 11 binary environmental bytes; layout in ENVIRONMENT_PACKET.md.
+- Example all-valid hex: `1f09dd13bac38e00003039` (25.25 C, 50.50 %RH,
+  100124 Pa after rounding, 12345 ohm).
 - First application packet is scheduled no earlier than 60 seconds after
   successful OTAA activation returns, including after recovery and rejoining.
   The scheduler and serial output remain active throughout this wait; no
@@ -46,11 +48,11 @@ successful-report cadence fixed.
   or fetch queued commands. MAC commands sent in response to the first uplink
   are therefore processed during that transaction if it reaches reception;
   a transmit error can return before the receive windows and MAC processing.
-  Application setting commands remain ignored for this fixed Hello World test.
+  Application setting commands remain ignored for this fixed environmental test.
 - Empty application transactions can carry pending MAC commands when the live
-  payload limit cannot fit the text. Persistent MAC responses may need further
+  payload limit cannot fit the environmental packet. Persistent MAC responses may need further
   downlinks; successful maintenance transactions continue at the normal
-  one-minute cadence while the text stays pending. They do not trigger a
+  one-minute cadence while environmental reporting stays pending. They do not trigger a
   three-attempt fault. Payload eligibility comes from stock RadioLib; see its
   remaining limitations below.
 - Uplinks are unconfirmed. Local transaction success does not establish Helium
@@ -67,7 +69,7 @@ interface; implementations and mutable module state live in its `.cpp` file.
 
 | Module | Responsibility |
 | --- | --- |
-| `app_service.h/.cpp` | Application state machine and Hello World cadence |
+| `app_service.h/.cpp` | Application state machine and environmental reporting cadence |
 | `clock_service.h/.cpp` | Crystal calibration and startup timing verification |
 | `eeprom_service.h/.cpp` | Settings layout, reserved old nonce area and shared EEPROM bootstrap |
 | `lorawan_service.h/.cpp` | Radio, node, credentials, join and transaction wrappers |
@@ -76,15 +78,15 @@ interface; implementations and mutable module state live in its `.cpp` file.
 | `nonce_store.h/.cpp` | Flash journal and checked copies of retained nonce history |
 | `log_service.h/.cpp` | Shared serial queue and output service |
 | `settings_service.h/.cpp` | Retained settings schema, validation and persistence |
-| `payload_service.h/.cpp` | Retained sensor encoders and command decoder |
-| `sensor_service.h/.cpp` | BME688 forced-mode acquisition and periodic Serial diagnostics |
+| `payload_service.h/.cpp` | Fixed environmental packet, historical encoders and command decoder |
+| `sensor_service.h/.cpp` | BME688 acquisition, fresh-sample cache and Serial diagnostics |
 
 `config.h`, `log_config.h` and `firmware_features.h` remain configuration
 headers. The bench build defaults to `SENSOR_SERVICE_ENABLED=1` in
 `firmware_features.h`, using Bosch BME68x Sensor library 1.3.40408 and `Wire1`
 at `0x77`. Set it to 0 for the radio-only fallback without bus initialization
-or the Bosch dependency. The Hello World application continues to bypass saved
-settings and environmental encoding. See SENSOR_TEST.md for sensor wiring and
+or the Bosch dependency. The environmental test continues to bypass saved
+settings and historical encoding. See SENSOR_TEST.md for sensor wiring and
 physical validation.
 
 ## Serial output
@@ -292,12 +294,12 @@ responses inside the library.
 
 After three consecutive payload-size or dwell-time rejections, the firmware
 tries a data-rate candidate through public `setDatarate()`. Candidates must have
-regional payload capacity for the fixed text plus the maximum 15-byte FOpts
+regional payload capacity for the fixed packet plus the maximum 15-byte FOpts
 queue; the library verifies the enabled channel plan and radio support. The
 regional `payloadLenMax` is the application N-value and already excludes fixed
-frame overhead. The full-queue bound is therefore `text bytes + 15`, without an
+frame overhead. The full-queue bound is therefore `packet bytes + 15`, without an
 additional 13 bytes. RadioLib adds and subtracts those 13 bytes internally. A
-candidate's reported live capacity must fit the text and stay within its
+candidate's reported live capacity must fit the packet and stay within its
 regional maximum. Each rate is considered at most once until a successful
 transaction or new join resets the candidate mask. Retry remains one minute
 apart. If no candidate works, the firmware pauses with an explicit capacity
@@ -369,7 +371,7 @@ transmit methods with the firmware wrappers. They cover TX-timeout nonce skippin
 normal no-JoinAccept progression, restore rejection, exhaustion, failed writes,
 node recreation with JoinNonce retention, and scheduler recovery after a timeout.
 Scheduler checks also cover eight persistent MAC-only transactions and resuming
-text, reset backoff after rejoin, real airtime deferrals, bounded recovery errors,
+environmental reports, reset backoff after rejoin, real airtime deferrals, bounded recovery errors,
 and cooldown across timer rollover. Additional checks cover periodic long-wait
 rechecks without early RF, invalid waits from both eligibility paths, join hardware
 error recovery with nonce retention, normal no-JoinAccept handling, and bounded
@@ -430,7 +432,7 @@ including first callback allocation. These checks require the installed
 RadioLib and Apollo3
 core used by the board build (`RADIOLIB_UPSTREAM` and `APOLLO3_CORE` can override
 their paths). They do not replace a physical-board test: after flashing, verify
-multiple consecutive Hello World uplinks with increasing frame counters and
+multiple consecutive environmental uplinks with increasing frame counters and
 receive-window processing, without the recurring timeout/rejoin cycle.
 
 ## Bench check
@@ -440,10 +442,10 @@ receive-window processing, without the recurring timeout/rejoin cycle.
    a measured clock result, persistence readiness, radio initialization and join.
    Sensor initialization/readings should also appear as described in SENSOR_TEST.md.
 3. In Helium, inspect raw bytes on FPort 1. Bypass the old environmental decoder.
-   Confirm the text hex above and at least three packets about one minute apart.
+   Confirm 11-byte environmental packets and at least three reports about one minute apart.
 4. Verify that successful sends without application downlinks log zero bytes.
 5. Reboot after failed joins and confirm that new requests use a higher DevNonce
    using network-side join-request logs. Controlled power-interruption testing
    remains required to validate journal behavior on actual hardware.
 
-Environmental readings remain Serial-only during this radio baseline test.
+Environmental readings now go to RF and Serial; decoder implementation follows separately.

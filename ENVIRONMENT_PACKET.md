@@ -126,6 +126,7 @@ python3 tests/check_logic.py
 python3 tests/check_modules.py
 python3 tests/check_logging.py
 python3 tests/check_radio_hal.py
+python3 tests/check_ide_config.py
 ```
 
 The BSEC host test simulates the opaque ARM algorithm's public API; actual

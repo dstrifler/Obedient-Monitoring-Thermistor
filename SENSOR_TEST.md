@@ -35,14 +35,45 @@ bme688_sel_33v_3s_4d profile against the supported upstream release. Dependencie
 are used without source changes. [Bosch upstream](https://github.com/boschsensortec/Bosch-BSEC2-Library)
 provides the library and license.
 
-## Local build on Linux
+## Arduino IDE setup on Linux
 
 The stock Apollo3 core's linker recipe does not automatically link BSEC's
-precompiled archive. **A normal Arduino IDE 1.8.19 Verify build therefore needs
-additional linker configuration.** The project helper supplies it per build,
-including the existing reserved-flash guard, without editing the core/library.
-Install [Arduino CLI](https://arduino.github.io/arduino-cli/latest/installation/)
-and Python 3, with access to the installed board package/libraries, then run:
+precompiled archive. After installing the dependencies above, close Arduino IDE
+and run this once from the repository directory (Python 3 required):
+
+```sh
+python3 tools/configure-arduino-ide.py
+```
+
+Reopen Arduino IDE, select LoRa Thing Plus expLoRaBLE, and use Verify and Upload
+normally. Arduino CLI is not required for this setup.
+
+The helper creates a supported `boards.local.txt` override next to the installed
+Apollo3 `boards.txt`. Its settings apply only to expLoRaBLE: link Bosch's
+hard-float Cortex-M4 archive, enforce the nonce-journal flash boundary with
+`tools/nonce_guard.ld`, and limit the IDE's displayed upload capacity. The
+original core and library files stay unchanged. Existing local settings are
+preserved and backed up before the first change.
+
+The helper reads the IDE's sketchbook path from `~/.arduino15/preferences.txt`
+and discovers the installed Apollo3 package. If discovery is ambiguous, use
+`--platform-dir PATH` for the folder containing `platform.txt`/`boards.txt`,
+`--sketchbook-dir PATH` for your sketchbook, or `--bsec-dir PATH` for the Bosch
+library folder containing `library.properties`.
+
+Rerun after moving the repository or Bosch library, or updating the board
+package: the override contains absolute paths. Keep the repository available
+while building. To remove only these overrides, close the IDE and run:
+
+```sh
+python3 tools/configure-arduino-ide.py --remove
+```
+
+## Optional Arduino CLI build on Linux
+
+For a per-build alternative that does not install local board overrides,
+install [Arduino CLI](https://arduino.github.io/arduino-cli/latest/installation/)
+and run:
 
 ```sh
 python3 tools/build-local.py

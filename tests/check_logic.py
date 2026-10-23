@@ -57,6 +57,7 @@ void delay(uint32_t ms) { ticks += ms; }
 for name in ['log_config.h', 'log_service.h', 'log_service.cpp']:
     COMMON += re.sub(r'^#include .*\n', '', (ROOT / name).read_text(), flags=re.M)
 COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.h').read_text(), flags=re.M)
+COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.cpp').read_text(), flags=re.M)
 
 # Exercise the journal implementation itself with flash that can lose power
 # during body programming, commit programming, or page erasure.
@@ -97,7 +98,7 @@ public:
  }
 };
 '''
-journal = (ROOT / 'nonce_store.h').read_text()
+journal = (ROOT / 'nonce_store.cpp').read_text().replace('#include "nonce_store.h"\n', '')
 run('journal', COMMON + JOURNAL_FAKE + journal + r'''
 int main() {
  assert(nonceStoreScan());
@@ -133,7 +134,10 @@ int main() {
 ''', {'Arduino.h': '', 'RadioLib.h': '', 'FlashIAPBlockDevice.h': ''})
 
 # Compile the actual sketch after replacing only its hardware includes.
-sketch = re.sub(r'^#include .*\n', '', (ROOT / 'Obedient_Monitoring_Thermistor.ino').read_text(), flags=re.M)
+sketch = re.sub(r'^#include .*\n', '', (ROOT / 'app_service.cpp').read_text(), flags=re.M)
+# Keep the focused state-machine fixtures' setup/loop entry names. The board
+# and module-link checks compile the real Arduino wrapper and separate .cpps.
+sketch = sketch.replace('void appSetup()', 'void setup()').replace('void appLoop()', 'void loop()')
 import os
 upstream = Path(os.environ.get('RADIOLIB_UPSTREAM',
     str(ROOT.parent / '.thermistor-tools/user/libraries/RadioLib')))
@@ -294,7 +298,7 @@ int main() {
 ''')
 
 # Test the independent RTC measurement, including hour rollover and a stopped RTC.
-clock = (ROOT / 'clock_service.h').read_text()
+clock = (ROOT / 'clock_service.cpp').read_text()
 clock = clock[clock.index('static bool clockReadRtcHundredths'):clock.index('bool clockBegin()')]
 run('clock_rate', COMMON + r'''
 struct am_hal_rtc_time_t { uint32_t ui32ReadError,ui32Minute,ui32Second,ui32Hundredths; };
@@ -318,7 +322,7 @@ int main() {
 
 # Execute the production activation wrapper and reservation subclass. The fake
 # radio refuses transmission unless a greater nonce is already durable.
-lw = (ROOT / 'lorawan_service.h').read_text()
+lw = (ROOT / 'lorawan_service.cpp').read_text()
 node_class = lw[lw.index('class PersistentLoRaWANNode'):lw.index('static PersistentLoRaWANNode')]
 save = lw[lw.index('static bool lwSaveNonces()'):lw.index('int16_t lwRestore()')]
 activate = lw[lw.index('bool lwActivate()'):lw.index('// ============================================================\n// SEND UPLINK')]
@@ -595,7 +599,7 @@ stock_methods = ''.join(radio_method(signature) for signature in (
     'int16_t LoRaWANNode::transmitUplink(',
     'RadioLibTime_t LoRaWANNode::timeUntilUplink()',
 ))
-recover = lw[lw.index('static bool lwRecover()'):lw.index('bool lwActivate()')]
+recover = lw[lw.index('bool lwRecover()'):lw.index('bool lwActivate()')]
 STOCK_FAKE = r'''
 using RadioLibTime_t=uint32_t;
 #define LORA_USE_OTAA 1
@@ -720,6 +724,52 @@ bool lwTryCapacityDataRate(size_t,uint16_t&) { return false; }
 '''
 stock_integration = (COMMON + error_constants + schema + STOCK_FAKE + templates +
                      stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
+
+# The split journal exposes a copy API rather than globals. Exercise actual
+# restore/migration with the real journal and stock nonce serialization.
+restore_flash = JOURNAL_FAKE.replace('#define RADIOLIB_LORAWAN_NONCES_BUF_SIZE 18', '')
+restore_journal = journal.replace('bool nonceStoreBegin()', 'bool hostUnusedNonceStoreBegin()')
+restore_state = re.sub(r'bool nonceStoreSave\(const uint8_t\* p\) \{.*?\n\}', '', STOCK_STATE, flags=re.S)
+restore_state = re.sub(r'int16_t lwRestore\(\) \{.*?\n\}', '', restore_state, flags=re.S)
+restore_state = restore_state.replace('durable+RADIOLIB_LORAWAN_NONCES_DEV_NONCE',
+                                      'gNonceSaved+RADIOLIB_LORAWAN_NONCES_DEV_NONCE')
+restore_source = lw[lw.index('int16_t lwRestore()'):lw.index('// ============================================================\n// ACTIVATE')]
+run('split_journal_restore_and_legacy_migration', COMMON + error_constants + schema +
+    restore_flash + restore_journal + r'''
+#define EEPROM_LORAWAN_NONCES_BYTES RADIOLIB_LORAWAN_NONCES_BUF_SIZE
+#define EEPROM_LORAWAN_FLAG_ADDR RADIOLIB_LORAWAN_NONCES_BUF_SIZE
+#define EEPROM_LORAWAN_FLAG_VALUE 0xA5
+struct Legacy : FlashIAPBlockDevice {Legacy():FlashIAPBlockDevice(0,8192){}} EEPROM;
+bool nonceStoreBegin(){return nonceStoreScan();}
+''' + STOCK_FAKE + templates + stock_methods + node_class + restore_state + save + restore_source + r'''
+void freshNode(){gNode=PersistentLoRaWANNode(&gRadio,&gRegion,LORA_SUB_BAND);}
+void clearJournal(){std::fill(gNonceFlash.data.begin(),gNonceFlash.data.end(),255);gNonceFlash.readFailure=false;assert(nonceStoreScan());freshNode();}
+int main(){
+ mod.hal=&hal;gRadio.mod=&mod;auto blank=gNonceFlash.data;auto legacyBlank=EEPROM.data;
+ assert(lwRestore()==0 && gPersistenceHealthy && !gNonceStoreHasRecord && gNode.nextDevNonce()==0);
+ uint8_t history[RADIOLIB_LORAWAN_NONCES_BUF_SIZE],copied[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+ gNode.reservedNonces(history,32);assert(nonceStoreSave(history));
+ assert(nonceStoreLoad(copied,sizeof(copied)) && memcmp(copied,history,sizeof(history))==0);
+ assert(!nonceStoreLoad(nullptr,sizeof(copied)) && !nonceStoreLoad(copied,sizeof(copied)-1));
+ // Existing journal history skips the legacy device entirely.
+ EEPROM.readFailure=true;freshNode();assert(lwRestore()==0 && gNode.nextDevNonce()==32 && gReservedNonceLimit==32);
+ assert(EEPROM.data==legacyBlank);
+ auto saved=gNonceFlash.data;freshNode();gNode.keyCheckSum^=1;
+ assert(lwRestore()==RADIOLIB_ERR_NONCES_DISCARDED && !gPersistenceHealthy && gNonceFlash.data==saved);
+ clearJournal();EEPROM.readFailure=false;
+ memcpy(EEPROM.data.data(),history,sizeof(history));EEPROM.data[EEPROM_LORAWAN_FLAG_ADDR]=0xA5;
+ auto legacyHistory=EEPROM.data;
+ assert(lwRestore()==0 && gNode.nextDevNonce()==32 && gReservedNonceLimit==32 && gNonceStoreHasRecord);
+ assert(EEPROM.data==legacyHistory && nonceStoreLoad(copied,sizeof(copied)) && memcmp(copied,history,sizeof(history))==0);
+ clearJournal();EEPROM.readFailure=true;
+ assert(lwRestore()==LW_ERR_PERSISTENCE && !gPersistenceHealthy && gNonceFlash.data==blank);
+ EEPROM.readFailure=false;EEPROM.data[0]^=1;freshNode();
+ assert(lwRestore()!=0 && !gPersistenceHealthy && gNonceFlash.data==blank);
+ EEPROM.data=legacyBlank;EEPROM.data[0]=0;freshNode();
+ assert(lwRestore()==LW_ERR_PERSISTENCE && !gPersistenceHealthy && gNonceFlash.data==blank);
+}
+''', {'Arduino.h':'', 'RadioLib.h':'', 'FlashIAPBlockDevice.h':''})
+
 run('stock_join_nonce_skip_and_recovery', stock_integration + r'''
 int main() {
  mod.hal=&hal;gRadio.mod=&mod;ticks=1000;
@@ -908,7 +958,7 @@ capacity_methods = stock_methods + ''.join(radio_method(signature) for signature
     'int16_t LoRaWANNode::isValidUplink(',
     'int16_t LoRaWANNode::setDatarate(',
 ))
-capacity_selector = lw[lw.index('static bool lwTryCapacityDataRate('):lw.rindex('#endif')]
+capacity_selector = lw[lw.index('bool lwTryCapacityDataRate('):]
 capacity_state = STOCK_STATE.replace('bool lwTryCapacityDataRate(size_t,uint16_t&) { return false; }', '')
 capacity_integration = (COMMON + error_constants + schema + capacity_defines + capacity_fixture +
                         templates + capacity_methods + node_class + capacity_state + save + recover +

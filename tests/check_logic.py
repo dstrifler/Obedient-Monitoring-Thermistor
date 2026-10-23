@@ -205,26 +205,28 @@ int main() {
  uint32_t idleStart=ticks; loop(); assert(uint32_t(ticks-idleStart)==40);
  reset(); ticks=UINT32_MAX-19; gNextSchedulerTickMs=ticks+40;
  idleStart=ticks; loop(); assert(uint32_t(ticks-idleStart)==40);
- reset(); advance(500); assert(sends.size()==1 && gPendingDownlinkLen==0);
+ reset(); advance(60500); assert(sends.size()==1 && gPendingDownlinkLen==0);
  uint32_t first=sends[0]; advance(59000); assert(sends.size()==1);
  advance(1200); assert(sends.size()==2 && sends[1]-first>=60000 && sends[1]-first<=60100);
  reset(); joinWorks=false; advance(59000); assert(sends.empty() && joins==1);
- joinWorks=true; advance(1500); assert(sends.size()==1);
- reset(); limit=8; advance(500); assert(lengths.size()==1 && lengths[0]==0);
+ joinWorks=true; advance(1500); assert(sends.empty() && joins==2);
+ advance(60000); assert(sends.size()==1);
+ reset(); limit=8; advance(60500); assert(lengths.size()==1 && lengths[0]==0);
  limit=11; advance(61000); assert(lengths.size()==2 && lengths[1]==11);
- reset(); eligibleAt=ticks+10000; advance(500); assert(sends.empty()); advance(10100); assert(sends.size()==1);
- reset(); sendResult=-42; advance(500); assert(sends.size()==1);
+ reset(); eligibleAt=ticks+70000; advance(60500); assert(sends.empty()); advance(10100); assert(sends.size()==1);
+ reset(); sendResult=-42; advance(60500); assert(sends.size()==1);
  advance(5500); assert(sends.size()==2); advance(10000); assert(sends.size()==3);
  assert(sends[2]-sends[1]>=10000);
- reset(); sendResult=RADIOLIB_ERR_INVALID_PORT; advance(1000); assert(gSchedulerState==SCHED_FAULT);
+ reset(); sendResult=RADIOLIB_ERR_INVALID_PORT; advance(61000); assert(gSchedulerState==SCHED_FAULT);
  advance(60000); assert(sends.size()==1);
  reset(); joinWorks=false; persistence=false; advance(500); assert(gSchedulerState==SCHED_FAULT && sends.empty());
- reset(); sendResult=RADIOLIB_ERR_NETWORK_NOT_JOINED; advance(200); sendResult=0; advance(1000); assert(joins==2);
+ reset(); sendResult=RADIOLIB_ERR_NETWORK_NOT_JOINED; advance(60200); sendResult=0; advance(1000); assert(joins==2);
  reset(); ticks=UINT32_MAX-32000; eligibleAt=ticks; gNextSchedulerTickMs=ticks; gLastJoinAttemptMs=ticks-60000;
  advance(500);assert(sends.empty() && gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER);
- advance(93000);assert(sends.size()==1 && recoveries==1);
+ advance(93000);assert(sends.empty() && recoveries==1);
+ advance(61000);assert(sends.size()==1);
  // Persistent MAC responses continue at one-minute intervals until room returns.
- reset(); limit=10; advance(480000);
+ reset(); limit=10; advance(481000);
  assert(sends.size()==8 && gSchedulerState!=SCHED_FAULT);
  for(size_t i=0;i<lengths.size();++i) {
    assert(lengths[i]==0);
@@ -237,14 +239,15 @@ int main() {
  assert(ensureJoined() && gRetryBackoffMs==5000);
  gSchedulerState=SCHED_SEND_UPLINK;loop();assert(gReportWaitMs==5000);
  // Unavailable with no airtime wait gets three retries, then a quiet cooldown.
- reset();sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;advance(12000);
+ reset();sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;advance(72000);
  assert(sends.size()==3 && gSchedulerState==SCHED_RECOVER_RADIO && recoveries==0);
  uint32_t recoveryStart=gRecoveryStartedMs;
  advance(58000);assert(recoveries==0 && sends.size()==3);
  sendResult=0;advance(4000);
- assert(uint32_t(ticks-recoveryStart)>=60000 && recoveries==1 && joins==2 && sends.size()==4);
+ assert(uint32_t(ticks-recoveryStart)>=60000 && recoveries==1 && joins==2 && sends.size()==3);
+ advance(61000);assert(sends.size()==4);
  // A real duty-cycle deferral does not consume the stuck-state counter.
- reset();sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;advance(1000);
+ reset();sendResult=RADIOLIB_ERR_UPLINK_UNAVAILABLE;advance(61000);
  eligibleAt=ticks+10000;advance(6000);assert(gUnavailableAttempts==0 && recoveries==0);
  // Three failed recoveries stop; persistence errors stop on the first attempt.
  reset();recoveryWorks=false;scheduleRadioRecovery();advance(181000);
@@ -255,6 +258,42 @@ int main() {
  reset();ticks=UINT32_MAX-30000;gNextSchedulerTickMs=ticks;scheduleRadioRecovery();
  advance(89000);assert(recoveries==0);advance(2000);assert(recoveries==1);
 
+}
+''')
+
+# Activation takes six simulated seconds so the first interval must start at
+# successful completion, rather than setup or the beginning of a join attempt.
+delayed_join_fakes = FAKES.replace(
+    'bool lwActivate() { ++joins; activated=joinWorks; return activated; }', r'''
+std::vector<uint32_t> joinCompletions;
+bool lwActivate() {
+ ++joins;ticks+=6000;activated=joinWorks;
+ if(activated)joinCompletions.push_back(ticks);
+ return activated;
+}
+''')
+run('first_uplink_waits_after_join_and_recovery', COMMON.replace(
+    'void delay(uint32_t ms) { ticks += ms; }',
+    'uint32_t maxApplicationDelay=0;\n'
+    'void delay(uint32_t ms) { maxApplicationDelay=std::max(maxApplicationDelay,ms);ticks+=ms; }')
+    + delayed_join_fakes + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ setup();maxApplicationDelay=0;loop();assert(joinCompletions.size()==1);
+ uint32_t joined=joinCompletions.back();
+ advance(59900);assert(sends.empty() && eligibilityQueries==0);
+#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
+ assert(Serial.output.find("first uplink scheduled in 60 seconds")!=std::string::npos);
+#endif
+ advance(250);assert(sends.size()==1);
+ assert(uint32_t(sends[0]-joined)>=60000 && uint32_t(sends[0]-joined)<=60150);
+ advance(59000);assert(sends.size()==1);
+ advance(1500);assert(sends.size()==2 && uint32_t(sends[1]-sends[0])>=60000);
+ scheduleRadioRecovery();advance(59000);assert(recoveries==0);
+ advance(2000);assert(recoveries==1 && joinCompletions.size()==2 && sends.size()==2);
+ joined=joinCompletions.back();advance(59900);assert(sends.size()==2);
+ advance(250);assert(sends.size()==3 && uint32_t(sends.back()-joined)>=60000);
+ assert(maxApplicationDelay<=50);
 }
 ''')
 
@@ -279,7 +318,7 @@ int main() {
  }
  // Resume ordinary reports after the former multi-day sleep trigger, keeping
  // the normal cadence instead of sending a burst for missed intervals.
- reset();advance(500);assert(sends.size()==1);
+ reset();advance(60500);assert(sends.size()==1);
  ticks+=0x90000000UL;uint32_t resumed=ticks;maxApplicationDelay=0;
  // Explicitly allow RF now: the fake eligibility timer's signed comparison
  // only supports shorter gaps, unlike this scheduler regression.
@@ -826,14 +865,15 @@ run('stock_transmit_scheduler_recovery', stock_integration + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
  mod.hal=&hal;gRadio.mod=&mod;setup();gRadio.uplinkResult=-42;
- advance(25000);
+ advance(85000);
  assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.uplinkCalls==1 && initializations==1);
  assert(gRadio.attempted.size()==1 && gRadio.attempted[0]==0);
  uint32_t recoveryStart=gRecoveryStartedMs;
  advance(50000);assert(initializations==1 && gRadio.uplinkCalls==1);
  gRadio.uplinkResult=0;advance(20000);
  assert(uint32_t(ticks-recoveryStart)>=60000);
- assert(initializations==2 && gRadio.uplinkCalls==2 && gSchedulerState!=SCHED_FAULT);
+ assert(initializations==2 && gRadio.uplinkCalls==1 && gSchedulerState!=SCHED_FAULT);
+ advance(61000);assert(gRadio.uplinkCalls==2);
  assert(gRadio.attempted.size()==2 && gRadio.attempted[1]==16);
  assert(gRetryBackoffMs==5000 && gUnavailableAttempts==0);
  advance(61000);assert(gRadio.uplinkCalls==3);
@@ -845,7 +885,7 @@ void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)
 int main() {
  setup();eligibleAt=ticks+180000;
  advance(125000);
- assert(sends.empty() && eligibilityQueries>=3 && recoveries==0 && gReportWaitMs<=60000);
+ assert(sends.empty() && eligibilityQueries>=2 && recoveries==0 && gReportWaitMs<=60000);
  advance(60000);assert(sends.size()==1); // No RF before the real eligibility deadline.
  // Rechecks also notice when a long deferral is removed early.
  eligibleAt=ticks+3600000;gSchedulerState=SCHED_SEND_UPLINK;loop();
@@ -889,7 +929,7 @@ run('capacity_retry_policy', COMMON + FAKES + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
  setup();sendResult=RADIOLIB_ERR_PACKET_TOO_LONG;
- advance(121000);assert(sends.size()==3 && capacityChanges==1 && gSchedulerState!=SCHED_FAULT);
+ advance(181000);assert(sends.size()==3 && capacityChanges==1 && gSchedulerState!=SCHED_FAULT);
  advance(61000);assert(sends.size()==4 && lengths.back()==11 && gCapacityRatesTried==0);
  // A candidate that still fails is not selected again indefinitely.
  sendResult=RADIOLIB_ERR_DWELL_TIME_EXCEEDED;capacityImproves=false;
@@ -910,21 +950,22 @@ int main() {
  advance(58000);assert(initializations==1);
  gRadio.joinResult=0;advance(12000);
  assert(initializations==2 && lwIsActivated() && gRadio.attempted.size()==4);
- assert(gRadio.attempted.back()==48 && durableLimit()==64 && gRadio.uplinkCalls==1);
+ assert(gRadio.attempted.back()==48 && durableLimit()==64 && gRadio.uplinkCalls==0);
+ advance(61000);assert(gRadio.uplinkCalls==1);
 }
 ''')
 
 run('stock_rollover_wait_recovery', stock_integration + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
- mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(67000);
  assert(lwIsActivated() && gRadio.uplinkCalls==1);
  ticks=1000;gNode.rxDelayStart=UINT32_MAX-1000;gNode.rxDelayEnd=UINT32_MAX-500;
  gNode.dutyCycle=0;gNextSchedulerTickMs=ticks;gSchedulerState=SCHED_SEND_UPLINK;
  assert(lwTimeUntilUplink()>0x7FFFFFFFUL);loop();
  assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.uplinkCalls==1);
  advance(59000);assert(initializations==1);
- advance(12000);assert(initializations==2 && lwIsActivated() && gRadio.uplinkCalls==2);
+ advance(72000);assert(initializations==2 && lwIsActivated() && gRadio.uplinkCalls==2);
 }
 ''')
 
@@ -982,7 +1023,7 @@ capacity_integration = (COMMON + error_constants + schema + capacity_defines + c
 run('stock_payload_capacity_recovery', capacity_integration + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
- mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(67000);
  assert(lwIsActivated() && gRadio.uplinkCalls==1);
  gNode.fOptsUpLen=12;assert(lwMaxPayloadBytes()==255);
  advance(181000);
@@ -1006,7 +1047,7 @@ int main() {
 run('serial_level_preserves_radio_operations', capacity_integration + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
- mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(67000);
  assert(lwIsActivated() && gRadio.uplinkCalls==1);
  unsigned before=gRadio.uplinkCalls;
  gNode.phyConfigurations=0;gNode.failPhyConfiguration=2;
@@ -1084,7 +1125,7 @@ hardware_integration = (COMMON + error_constants + schema + hardware_fixture + t
 run('stock_uplink_spi_error_recovery', hardware_integration + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
- mod.hal=&hal;gRadio.mod=&mod;setup();advance(7000);
+ mod.hal=&hal;gRadio.mod=&mod;setup();advance(67000);
  assert(lwIsActivated() && gRadio.uplinkCalls==1);
  uint32_t acceptedJoinNonce=gNode.joinNonce;uint16_t reserved=durableLimit();
  gNode.forcedPhyError=RADIOLIB_ERR_SPI_CMD_TIMEOUT;
@@ -1098,7 +1139,8 @@ int main() {
  // nonce reservation, then obtain fresh keys/counters through OTAA before RF.
  advance(10000);
  assert(uint32_t(ticks-recoveryStart)>=60000 && initializations==2);
- assert(lwIsActivated() && gRadio.uplinkCalls==2 && gUplinkHardwareFailures==0);
+ assert(lwIsActivated() && gRadio.uplinkCalls==1 && gUplinkHardwareFailures==0);
+ advance(61000);assert(gRadio.uplinkCalls==2);
  assert(gRadio.attempted.back()==reserved && gNode.joinNonce==acceptedJoinNonce+1);
  advance(61000);assert(gRadio.uplinkCalls==3);
 }
@@ -1139,7 +1181,7 @@ int main() {
  gLastJoinAttemptMs=ticks-60000;gNextSchedulerTickMs=ticks;
  loop();assert(gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER);
  advance(59000);assert(initializations==1 && gRadio.attempted.empty());
- advance(10000);assert(initializations==2 && lwIsActivated() && gRadio.uplinkCalls==1);
+ advance(71000);assert(initializations==2 && lwIsActivated() && gRadio.uplinkCalls==1);
  assert(gRadio.attempted.back()==0);
  uint16_t reserved=durableLimit();uint32_t acceptedJoinNonce=gNode.joinNonce;
  // Do the same with a live session. No pre-wrap application or maintenance RF.
@@ -1148,7 +1190,7 @@ int main() {
  advance(LW_TRANSACTION_GUARD_MS-1000);
  assert(initializations==2 && gRadio.uplinkCalls==1);
  advance(59000);assert(initializations==2); // Still within the post-wrap cooldown.
- advance(10000);
+ advance(71000);
  assert(initializations==3 && lwIsActivated() && gRadio.uplinkCalls==2);
  assert(gRadio.attempted.back()==reserved && gNode.joinNonce==acceptedJoinNonce+1);
  assert(maxHalDelay<60000);
@@ -1158,7 +1200,7 @@ int main() {
  gNextSchedulerTickMs=ticks;gSchedulerState=SCHED_SEND_UPLINK;
  loop();assert(gSchedulerState==SCHED_RECOVER_RADIO && gRadio.uplinkCalls==2);
  advance(59000);assert(initializations==3);
- advance(10000);assert(initializations==4 && gRadio.uplinkCalls==3);
+ advance(71000);assert(initializations==4 && gRadio.uplinkCalls==3);
  // A wrapper return observed just after wrap must not wait another 49 days.
  ticks=100;gNextSchedulerTickMs=ticks;scheduleTimerRolloverWait();
  assert(gSchedulerState==SCHED_RECOVER_RADIO);
@@ -1182,7 +1224,7 @@ int main() {
  assert(gRadio.attempted.empty() && durableLimit()==16 && gNode.nextDevNonce()==0);
  // A durable reservation with no RF remains safe: recovery skips the batch.
  assert(!ensureJoined() && gSchedulerState==SCHED_WAIT_TIMER_ROLLOVER);
- gNextSchedulerTickMs=ticks;advance(LW_TRANSACTION_GUARD_MS+70000);
+ gNextSchedulerTickMs=ticks;advance(LW_TRANSACTION_GUARD_MS+130000);
  assert(initializations==2 && lwIsActivated() && gRadio.attempted.back()==16);
  assert(gRadio.uplinkCalls==1 && maxHalDelay<60000);
  // Even a flash stall spanning the entire guard and wrap cannot authorize RF
@@ -1368,7 +1410,7 @@ int main() {
 run('serial_backpressure_and_fault_state', COMMON + FAKES + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {
- Serial.ready=false;setup();advance(185000);
+ Serial.ready=false;setup();advance(245000);
  assert(joins==1 && sends.size()==4 && Serial.output.empty());
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
  for(unsigned i=0;i<20;++i) { LOG_INFO("Pressure", "Pending %u", i); }

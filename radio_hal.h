@@ -17,6 +17,7 @@ public:
 
 private:
   void recordStatus(uint32_t result);
+  bool maskDio1Interrupt();  // Masks just DIO1; releases the global critical section.
   void restoreDio1Polling();  // Caller holds the critical section.
   const uint32_t dio1Pin_;
   const uint32_t dio1Pad_;

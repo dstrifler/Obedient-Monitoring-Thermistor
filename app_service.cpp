@@ -8,6 +8,7 @@
 #include "lorawan_service.h"
 #include "lorawan_timer.h"
 #include "sensor_service.h"
+#include "payload_service.h"
 
 // ============================================================
 // APP STATE
@@ -18,8 +19,6 @@ static uint32_t gLastJoinAttemptMs = 0;
 static bool gLoRaJoined = false;
 // Fixed test cadence, independent of saved settings and sensor defaults.
 static constexpr uint32_t REPORT_INTERVAL_MS = 60UL * 1000UL;
-// Send only these 11 ASCII bytes, without the trailing NUL.
-static const uint8_t HELLO_WORLD_PAYLOAD[] = "Hello World";
 
 static const uint32_t JOIN_RETRY_MS = 60000UL;
 static const uint32_t REPORT_RETRY_BACKOFF_MS = 5000UL;
@@ -212,7 +211,7 @@ void appSetup() {
   logBegin(SERIAL_BAUD_RATE);
   logServiceDelay(2000);
 
-  LOG_INFO("App", "Garage Hello World Test Starting...");
+  LOG_INFO("App", "Garage Environmental Monitor Starting...");
 
   // Calibrate the Apollo3 HFRC before initializing the SX1262 or RadioLib.
   // Abort startup if timing cannot be verified: unreliable timing can miss
@@ -227,7 +226,7 @@ void appSetup() {
     appFault("EEPROM initialization failed.");
     return;
   }
-  LOG_INFO("Test", "Hello World starts 60 seconds after join, then repeats every 60 seconds.");
+  LOG_INFO("Test", "11-byte sensor reports start 60 seconds after join, then repeat every 60 seconds.");
   sensorStart();
 
   bool radioReady = false;
@@ -262,8 +261,7 @@ void appSetup() {
 // ============================================================
 // LOOP
 // ============================================================
-// Sensor diagnostics run alongside the fixed radio test; saved app settings
-// and environmental payload encoding remain bypassed.
+// Fixed environmental test format/cadence; saved app settings stay bypassed.
 // RadioLib still owns activation and Class A receive-window timing.
 
 void appLoop() {
@@ -325,11 +323,22 @@ void appLoop() {
     case SCHED_SEND_UPLINK: {
       uint32_t waitMs = lwTimeUntilUplink();
       if(deferForAirtime(waitMs)) { return; }
-      const size_t payloadLen = sizeof(HELLO_WORLD_PAYLOAD) - 1;
+      uint8_t payload[ENVIRONMENT_PACKET_SIZE];
+      SensorData sample = {};
+      const bool haveSample = sensorLatest(&sample);
+      const size_t payloadLen = payloadEncodeEnvironment(payload, sizeof(payload), haveSample ? &sample : nullptr);
+      if(payloadLen != ENVIRONMENT_PACKET_SIZE) {
+        appFault("Environmental packet encoding failed.");
+        return;
+      }
       size_t maxPayloadBytes = lwMaxPayloadBytes();
       bool macOnly = payloadLen > maxPayloadBytes;
-      if(macOnly) { LOG_INFO("Payload", "MAC-only transaction; Hello World remains pending."); }
-      else { LOG_DEBUG("Payload", "Hello World: 11 bytes."); }
+      if(macOnly) { LOG_INFO("Payload", "MAC-only transaction; sensor report remains pending."); }
+      else {
+        if(!haveSample) { LOG_WARN("Payload", "No fresh sensor sample; sending unavailable flags."); }
+        LOG_DEBUG("Payload", "Environmental report: 11 bytes, valid=0x%X.", unsigned(payload[0] & 0x0F));
+        LOG_TRACE_HEX("Payload", payload, payloadLen);
+      }
       gPendingDownlinkLen = 0;
       // Capacity queries configure the PHY. Log the existing result so the
       // output level cannot add radio operations or consume SPI failures.
@@ -337,7 +346,7 @@ void appLoop() {
         unsigned(maxPayloadBytes), unsigned(macOnly ? 0 : payloadLen));
 
       int16_t state = lwSendReceive(
-        HELLO_WORLD_PAYLOAD,
+        payload,
         macOnly ? 0 : payloadLen,
         gPendingDownlinkBuffer,
         &gPendingDownlinkLen
@@ -403,7 +412,7 @@ void appLoop() {
       gCapacityFailures = 0;
       gCapacityRatesTried = 0;
       // Persistent MAC responses may need multiple successful transactions.
-      // Keep the text pending and use the normal cadence for maintenance too.
+      // Keep environmental reporting pending and use the normal cadence for maintenance too.
       gLastReportMs = now;
       gReportWaitMs = REPORT_INTERVAL_MS;
       setSchedulerState(SCHED_PROCESS_DOWNLINK);
@@ -412,7 +421,7 @@ void appLoop() {
 
     case SCHED_PROCESS_DOWNLINK:
       if(gPendingDownlinkLen > 0) {
-        LOG_INFO("Downlink", "Received %u application bytes; commands ignored for fixed Hello World test.", unsigned(gPendingDownlinkLen));
+        LOG_INFO("Downlink", "Received %u application bytes; commands ignored for fixed environmental test.", unsigned(gPendingDownlinkLen));
         LOG_TRACE_HEX("Downlink", gPendingDownlinkBuffer, gPendingDownlinkLen);
       } else {
         LOG_DEBUG("Downlink", "No app downlink received.");

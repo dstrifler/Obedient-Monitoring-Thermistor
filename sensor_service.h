@@ -16,6 +16,10 @@ struct SensorData {
 void sensorStart();
 void sensorPoll();
 
+// Copies the latest validated sample, at most 65 seconds old. Missing, failed,
+// or stale acquisition returns false and leaves *data unchanged.
+bool sensorLatest(SensorData* data);
+
 // Begin configures only; trigger starts one conversion. Fetch returns false
 // while pending or on failure, leaving *data unchanged.
 bool sensorBegin();

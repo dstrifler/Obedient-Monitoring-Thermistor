@@ -75,6 +75,35 @@ static void payloadWriteU32BE(uint8_t* dst, uint32_t value) {
   dst[3] = (uint8_t)(value & 0xFF);
 }
 
+// Fixed 11-byte format, independent of saved field/unit/payload preferences:
+// [version:4 | valid T/H/P/G:4], int16 C*100, uint16 RH*100,
+// uint16 Pa/2 (rounded), uint32 gas ohms. Invalid slots contain zero.
+size_t payloadEncodeEnvironment(uint8_t* buffer, size_t maxLen, const SensorData* data) {
+  if(buffer == nullptr || maxLen < ENVIRONMENT_PACKET_SIZE) { return 0; }
+  memset(buffer, 0, ENVIRONMENT_PACKET_SIZE);
+  buffer[0] = ENVIRONMENT_PACKET_VERSION << 4;
+  if(data == nullptr) { return ENVIRONMENT_PACKET_SIZE; }
+
+  if(isfinite(data->temperatureC) && data->temperatureC >= -40.0f && data->temperatureC <= 85.0f) {
+    const int16_t temperature = int16_t(lroundf(data->temperatureC * 100.0f));
+    payloadWriteU16BE(buffer + 1, uint16_t(temperature));
+    buffer[0] |= 0x01;
+  }
+  if(isfinite(data->humidityPct) && data->humidityPct >= 0.0f && data->humidityPct <= 100.0f) {
+    payloadWriteU16BE(buffer + 3, uint16_t(lroundf(data->humidityPct * 100.0f)));
+    buffer[0] |= 0x02;
+  }
+  if(isfinite(data->pressurePa) && data->pressurePa >= 30000.0f && data->pressurePa <= 110000.0f) {
+    payloadWriteU16BE(buffer + 5, uint16_t(lroundf(data->pressurePa / 2.0f)));
+    buffer[0] |= 0x04;
+  }
+  if(data->gasValid && data->gasOhms > 0) {
+    payloadWriteU32BE(buffer + 7, data->gasOhms);
+    buffer[0] |= 0x08;
+  }
+  return ENVIRONMENT_PACKET_SIZE;
+}
+
 // ============================================================
 // COMPACT BINARY ENCODER
 // ============================================================

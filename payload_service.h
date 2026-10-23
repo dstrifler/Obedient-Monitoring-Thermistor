@@ -6,6 +6,12 @@
 #include "sensor_service.h"
 #include "settings_service.h"
 
+// Fixed FPort 1 environmental test format; multibyte values are big-endian.
+static constexpr size_t ENVIRONMENT_PACKET_SIZE = 11;
+static constexpr uint8_t ENVIRONMENT_PACKET_VERSION = 1;
+// Null data produces a full-length packet with all validity flags cleared.
+size_t payloadEncodeEnvironment(uint8_t* buffer, size_t maxLen, const SensorData* data);
+
 enum DownlinkCommandType : uint8_t {
   CMD_NONE                 = 0x00,
   CMD_SET_TEMP_ENABLED     = 0x01,

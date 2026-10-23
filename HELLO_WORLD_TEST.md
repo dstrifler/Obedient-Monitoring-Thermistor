@@ -38,7 +38,7 @@ interface; implementations and mutable module state live in its `.cpp` file.
 | --- | --- |
 | `app_service.h/.cpp` | Application state machine and Hello World cadence |
 | `clock_service.h/.cpp` | Crystal calibration and startup timing verification |
-| `eeprom_service.h/.cpp` | Legacy/settings layout and shared EEPROM bootstrap |
+| `eeprom_service.h/.cpp` | Settings layout, reserved old nonce area and shared EEPROM bootstrap |
 | `lorawan_service.h/.cpp` | Radio, node, credentials, join and transaction wrappers |
 | `lorawan_timer.h/.cpp` | Transaction rollover guard |
 | `nonce_store.h/.cpp` | Flash journal and checked copies of retained nonce history |
@@ -170,9 +170,19 @@ current full page, automatic reclamation stops with an explicit migration error.
 It does not erase history to make room. A journal already damaged by an erase
 performed without intent metadata also remains ambiguous and requires recovery.
 
-The legacy EEPROM page at `0xFE000`, including saved application settings, stays
-untouched. Valid legacy nonce records migrate with checked reads. Historical
-nonces lost by the old firmware cannot be reconstructed.
+The EEPROM page at `0xFE000`, including saved application settings, stays
+untouched by nonce restoration. The dedicated journal is the only nonce source;
+old EEPROM nonce records are neither checked nor migrated, regardless of their
+contents. Its old nonce area remains reserved to preserve settings offsets.
+An empty journal starts fresh and logs a warning. Before the first join
+transmission, the normal reservation path must write and verify a nonce batch
+in the journal. Subsequent boots restore that journal and skip unused reserved
+values. Existing invalid or damaged journal records still stop joining.
+
+Starting with an empty journal discards any protection provided by old EEPROM
+nonce history. With previously used OTAA credentials, this can reuse a DevNonce
+and cause network rejection. Skipping EEPROM does not reset network-side history
+or reconstruct historical nonces; reconcile network provisioning if this occurs.
 
 The supported build script reserves the last 24 KiB of flash with a linker
 limit. A runtime image-boundary check also stops writes if the image overlaps

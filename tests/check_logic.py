@@ -726,7 +726,7 @@ stock_integration = (COMMON + error_constants + schema + STOCK_FAKE + templates 
                      stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
 
 # The split journal exposes a copy API rather than globals. Exercise actual
-# restore/migration with the real journal and stock nonce serialization.
+# journal-only restore with the real journal and stock nonce serialization.
 restore_flash = JOURNAL_FAKE.replace('#define RADIOLIB_LORAWAN_NONCES_BUF_SIZE 18', '')
 restore_journal = journal.replace('bool nonceStoreBegin()', 'bool hostUnusedNonceStoreBegin()')
 restore_state = re.sub(r'bool nonceStoreSave\(const uint8_t\* p\) \{.*?\n\}', '', STOCK_STATE, flags=re.S)
@@ -734,14 +734,14 @@ restore_state = re.sub(r'int16_t lwRestore\(\) \{.*?\n\}', '', restore_state, fl
 restore_state = restore_state.replace('durable+RADIOLIB_LORAWAN_NONCES_DEV_NONCE',
                                       'gNonceSaved+RADIOLIB_LORAWAN_NONCES_DEV_NONCE')
 restore_source = lw[lw.index('int16_t lwRestore()'):lw.index('// ============================================================\n// ACTIVATE')]
-run('split_journal_restore_and_legacy_migration', COMMON + error_constants + schema +
+run('journal_only_restore_and_first_join', COMMON + error_constants + schema +
     restore_flash + restore_journal + r'''
 #define EEPROM_LORAWAN_NONCES_BYTES RADIOLIB_LORAWAN_NONCES_BUF_SIZE
 #define EEPROM_LORAWAN_FLAG_ADDR RADIOLIB_LORAWAN_NONCES_BUF_SIZE
 #define EEPROM_LORAWAN_FLAG_VALUE 0xA5
 struct Legacy : FlashIAPBlockDevice {Legacy():FlashIAPBlockDevice(0,8192){}} EEPROM;
 bool nonceStoreBegin(){return nonceStoreScan();}
-''' + STOCK_FAKE + templates + stock_methods + node_class + restore_state + save + restore_source + r'''
+''' + STOCK_FAKE + templates + stock_methods + node_class + restore_state + save + restore_source + activate + r'''
 void freshNode(){gNode=PersistentLoRaWANNode(&gRadio,&gRegion,LORA_SUB_BAND);}
 void clearJournal(){std::fill(gNonceFlash.data.begin(),gNonceFlash.data.end(),255);gNonceFlash.readFailure=false;assert(nonceStoreScan());freshNode();}
 int main(){
@@ -751,7 +751,7 @@ int main(){
  gNode.reservedNonces(history,32);assert(nonceStoreSave(history));
  assert(nonceStoreLoad(copied,sizeof(copied)) && memcmp(copied,history,sizeof(history))==0);
  assert(!nonceStoreLoad(nullptr,sizeof(copied)) && !nonceStoreLoad(copied,sizeof(copied)-1));
- // Existing journal history skips the legacy device entirely.
+ // Existing journal history is preserved even when EEPROM cannot be read.
  EEPROM.readFailure=true;freshNode();assert(lwRestore()==0 && gNode.nextDevNonce()==32 && gReservedNonceLimit==32);
  assert(EEPROM.data==legacyBlank);
  auto saved=gNonceFlash.data;freshNode();gNode.keyCheckSum^=1;
@@ -759,14 +759,30 @@ int main(){
  clearJournal();EEPROM.readFailure=false;
  memcpy(EEPROM.data.data(),history,sizeof(history));EEPROM.data[EEPROM_LORAWAN_FLAG_ADDR]=0xA5;
  auto legacyHistory=EEPROM.data;
- assert(lwRestore()==0 && gNode.nextDevNonce()==32 && gReservedNonceLimit==32 && gNonceStoreHasRecord);
- assert(EEPROM.data==legacyHistory && nonceStoreLoad(copied,sizeof(copied)) && memcmp(copied,history,sizeof(history))==0);
- clearJournal();EEPROM.readFailure=true;
- assert(lwRestore()==LW_ERR_PERSISTENCE && !gPersistenceHealthy && gNonceFlash.data==blank);
- EEPROM.readFailure=false;EEPROM.data[0]^=1;freshNode();
- assert(lwRestore()!=0 && !gPersistenceHealthy && gNonceFlash.data==blank);
+ // Even recognized legacy history is ignored, without changing EEPROM.
+ assert(lwRestore()==0 && gNode.nextDevNonce()==0 && gReservedNonceLimit==0 && !gNonceStoreHasRecord);
+ assert(EEPROM.data==legacyHistory && gNonceFlash.data==blank);
+ // Malformed, unrecognized and unreadable legacy data cannot block startup.
+ EEPROM.data[0]^=1;freshNode();assert(lwRestore()==0 && gNode.nextDevNonce()==0);
  EEPROM.data=legacyBlank;EEPROM.data[0]=0;freshNode();
- assert(lwRestore()==LW_ERR_PERSISTENCE && !gPersistenceHealthy && gNonceFlash.data==blank);
+ assert(lwRestore()==0 && gNode.nextDevNonce()==0 && gNonceFlash.data==blank);
+ EEPROM.readFailure=true;freshNode();assert(lwRestore()==0);
+ auto untouched=EEPROM.data;
+ // A failed first reservation must prevent all RF, even after a fresh start.
+ ticks=1000;gNonceFlash.cut=0;assert(!lwActivate());
+ assert(!gPersistenceHealthy && gRadio.attempted.empty());
+ gNonceFlash.cut=-1;freshNode();assert(lwRestore()==0);
+ // The real activation wrapper verifies a reservation before transmitting.
+ assert(lwActivate() && gRadio.attempted.size()==1 && gRadio.attempted[0]==0);
+ assert(gNonceStoreHasRecord && durableLimit()==16 && EEPROM.data==untouched);
+ freshNode();assert(lwRestore()==0 && gNode.nextDevNonce()==16 && gNode.joinNonce==1);
+ ticks+=60000;assert(lwActivate() && gRadio.attempted.back()==16 && durableLimit()==32);
+ assert(EEPROM.data==untouched);
+ // Journal read errors and corruption remain failures; no fresh-start fallback.
+ saved=gNonceFlash.data;gNonceFlash.readFailure=true;freshNode();
+ assert(lwRestore()==LW_ERR_PERSISTENCE && !gPersistenceHealthy && gNonceFlash.data==saved);
+ gNonceFlash.readFailure=false;gNonceFlash.data[0]^=1;saved=gNonceFlash.data;freshNode();
+ assert(lwRestore()==LW_ERR_PERSISTENCE && !gPersistenceHealthy && gNonceFlash.data==saved);
 }
 ''', {'Arduino.h':'', 'RadioLib.h':'', 'FlashIAPBlockDevice.h':''})
 

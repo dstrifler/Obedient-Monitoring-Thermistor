@@ -7,12 +7,13 @@
 #define EEPROM_TOTAL_BYTES 512
 
 // ------------------------------
-// LoRaWAN persistence block
+// Reserved legacy LoRaWAN block (no longer read or migrated)
 // ------------------------------
 // Expected bytes:
 // - Nonce persistence buffer: RADIOLIB_LORAWAN_NONCES_BUF_SIZE bytes
 // - Initialization flag:      1 byte
-// Keep this block contiguous so RadioLib state remains portable across firmware updates.
+// Keep this reservation so existing application settings retain their offsets.
+// Current LoRaWAN nonce persistence uses nonce_store, independently of EEPROM.
 #define EEPROM_ADDR_LORAWAN_BASE      0
 #define EEPROM_LORAWAN_NONCES_ADDR    EEPROM_ADDR_LORAWAN_BASE
 #define EEPROM_LORAWAN_NONCES_BYTES   RADIOLIB_LORAWAN_NONCES_BUF_SIZE

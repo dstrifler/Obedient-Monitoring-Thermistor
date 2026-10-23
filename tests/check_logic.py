@@ -36,6 +36,9 @@ COMMON = r'''
 #include <cstdio>
 #include <cstdarg>
 #include <string>
+constexpr int16_t LW_ERR_RADIO_GPIO=-31997;
+bool radioHalHealthy=true;
+bool lwRadioHalHealthy(){return radioHalHealthy;}
 using __FlashStringHelper = char;
 #define F(x) x
 #define HEX 16
@@ -861,6 +864,41 @@ int main() {
  assert(!lwRecover() && !gPersistenceHealthy && !lwIsActivated());
 }
 ''')
+gpio_failure_fixture = 'bool failGpioOnReceive=false,failGpioOnData=false;\n' + STOCK_FAKE.replace(
+    'ticks+=6000;rxDelayEnd=ticks;return joinReceiveResult;',
+    'ticks+=6000;rxDelayEnd=ticks;if(failGpioOnReceive)radioHalHealthy=false;return joinReceiveResult;').replace(
+    'if(result==0) { ticks+=2000;rxDelayEnd=ticks; }',
+    'if(result==0) { ticks+=2000;rxDelayEnd=ticks; }if(failGpioOnData)radioHalHealthy=false;')
+gpio_failure_integration = (COMMON + error_constants + schema + gpio_failure_fixture + templates +
+                            stock_methods + node_class + STOCK_STATE + save + recover + activate + wrapper)
+run('radio_gpio_wrapper_failures', gpio_failure_integration + r'''
+int main() {
+ mod.hal=&hal;gRadio.mod=&mod;ticks=1000;
+ radioHalHealthy=false;assert(!lwActivate() && lwLastActivationState()==LW_ERR_RADIO_GPIO);
+ assert(gRadio.attempted.empty() && !haveDurable);
+ radioHalHealthy=true;failGpioOnReceive=true;
+ assert(!lwActivate() && lwLastActivationState()==LW_ERR_RADIO_GPIO && gNode.isActivated());
+ assert(durableLimit()==16 && LoRaWANNode::ntoh<uint32_t>(durable+RADIOLIB_LORAWAN_NONCES_JOIN_NONCE,3)==1);
+ uint8_t data[255]={};size_t down=255;
+ assert(lwSendReceive(data,11,data,&down)==LW_ERR_RADIO_GPIO && down==0 && gRadio.uplinkCalls==0);
+ radioHalHealthy=true;failGpioOnReceive=false;failGpioOnData=true;ticks+=60000;
+ assert(lwSendReceive(data,11,data,&down)==LW_ERR_RADIO_GPIO && down==0 && gRadio.uplinkCalls==1);
+}
+''')
+
+run('radio_gpio_fault_policy', COMMON + FAKES + sketch + r'''
+void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
+int main() {
+ assert(LW_ERR_RADIO_GPIO!=LW_ERR_TIMER_ROLLOVER && permanentLoRaError(LW_ERR_RADIO_GPIO));
+ setup();joinWorks=false;activationResult=LW_ERR_RADIO_GPIO;advance(500);
+ assert(gSchedulerState==SCHED_FAULT && joins==1 && sends.empty());
+ advance(180000);assert(joins==1 && recoveries==0);
+ joinWorks=true;sendResult=LW_ERR_RADIO_GPIO;setup();advance(61000);
+ assert(gSchedulerState==SCHED_FAULT && sends.size()==1);
+ int before=joins;advance(180000);assert(joins==before && sends.size()==1 && recoveries==0);
+}
+''')
+
 run('stock_transmit_scheduler_recovery', stock_integration + sketch + r'''
 void advance(uint32_t ms) { uint32_t start=ticks;while(uint32_t(ticks-start)<ms)loop(); }
 int main() {

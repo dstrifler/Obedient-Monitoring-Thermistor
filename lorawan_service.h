@@ -8,6 +8,7 @@
 
 static constexpr int16_t LW_ERR_PERSISTENCE = -32000;
 static constexpr int16_t LW_ERR_NONCE_EXHAUSTED = -31999;
+static constexpr int16_t LW_ERR_RADIO_GPIO = -31997;
 
 // Wrapper policy for local preflight parameter validation:
 // - Prefer a generic RadioLib invalid-argument error code when available.

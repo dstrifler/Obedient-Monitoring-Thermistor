@@ -5,7 +5,7 @@ import base64
 import json
 
 COMMANDS = {'set': 1, 'configuration': 2, 'status': 3, 'defaults': 4,
-            'reset-request': 5, 'reset-confirm': 6}
+            'reset-request': 5, 'reset-confirm': 6, 'reboot-request': 7, 'reboot-confirm': 8}
 SETTINGS = {
     'report_mode': (1, {'dynamic': 0, 'fixed': 1}),
     'interval_minutes': (2, None),
@@ -42,12 +42,12 @@ def encode(command, request_id, changes=(), code=None):
         data += bytes([len(seen)] + pairs)
     elif changes:
         raise ValueError('--set is only valid with the set command')
-    if command == 'reset-confirm':
+    if command in ('reset-confirm', 'reboot-confirm'):
         if code is None or not 100000 <= code <= 999999:
             raise ValueError('Provide the current six-digit --code')
         data += code.to_bytes(4, 'big')
     elif code is not None:
-        raise ValueError('--code is only valid with reset-confirm')
+        raise ValueError('--code is only valid with reset-confirm or reboot-confirm')
     return bytes(data)
 
 def main():

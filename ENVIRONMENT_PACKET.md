@@ -53,14 +53,14 @@ satisfy the first-sensor-transmission gate.
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 1 | `A1`: application control protocol version 1 |
-| 1 | 1 | Kind: 0 result, 1 configuration, 2 status, 3 reset challenge |
+| 1 | 1 | Kind: 0 result, 1 configuration, 2 status, 3 factory-reset challenge, 4 reboot challenge |
 | 2–3 | 2 | Request ID, echoed from the downlink |
 | 4 | 1 | Command ID, echoed from the downlink; 0 for autonomous health |
 | 5 | 1 | Result code |
-| 6–9 | 4 | Value: reset challenge for kind 3; otherwise zero |
+| 6–9 | 4 | Value: confirmation code for kind 3/4; otherwise zero |
 
-Results: 0 accepted, 1 invalid, 2 save failed, 3 busy, 4 expired/no pending reset,
-5 wrong confirmation code, 6 request-ID conflict.
+Results: 0 accepted, 1 invalid, 2 save failed, 3 busy, 4 expired/no pending request,
+5 wrong confirmation code, 6 request-ID or confirmation-operation conflict.
 
 Result/challenge packets are 10 bytes. Configuration replies are 17 bytes:
 bytes 10–16 contain the seven setting values in the table below. They describe
@@ -79,7 +79,7 @@ Status packets are 26 bytes:
 | 18 | 1 | Seven-field validity, bits T/H/P/G/IAQ/CO2eq/VOCeq |
 | 19 | 1 | BSEC quality byte, same layout as sensor byte 19 |
 | 20 | 1 | Radio state: 0 stopped, 1 initializing, 2 joining, 3 ready, 4 cooldown, 5 rollover wait, 6 fault |
-| 21 | 1 | Manager state: low bits 0 starting, 1 running, 2 stopping, 3 erasing, 4 fault; bit 7 reset pending |
+| 21 | 1 | Manager state: bits 0–5: 0 starting, 1 running, 2 stopping, 3 erasing, 4 fault; bit 6 reboot confirmation pending; bit 7 factory-reset confirmation pending |
 | 22–23 | 2 | Signed int16 last radio result |
 | 24–25 | 2 | Latest record age in seconds; `FFFF` means no retained record |
 
@@ -103,6 +103,8 @@ Header: `[C1, command, request_id_hi, request_id_lo]`.
 | Reset application settings | 4 | None |
 | Request factory reset | 5 | None |
 | Confirm factory reset | 6 | Four-byte unsigned confirmation code |
+| Request reboot | 7 | None |
+| Confirm reboot | 8 | Four-byte unsigned confirmation code |
 
 A batch contains 1–7 unique setting IDs. Duplicate/unknown fields, extra bytes,
 invalid values, or an empty batch reject the command. The whole batch is
@@ -157,7 +159,7 @@ codec environments that support it.
    `python3 tools/downlink.py reset-confirm --id 51 --code 654321`.
 
 The example code is illustrative, not a universal authorization code. Only the
-current RAM-held challenge is accepted. It expires one hour after the initial
+current RAM-held challenge is accepted. It expires two hours after the initial
 request, including delivery time; duplicate requests do not extend it. Normal
 sensor reporting and Class A windows continue. There is no additional polling,
 Class C switch, or persistent reset marker. Wrong, stale, or expired codes do
@@ -171,6 +173,31 @@ stopped and logs an ERROR. Confirmation does not wait indefinitely for another
 RF acknowledgement. A power interruption has no reset-resumption guarantee.
 Compiled credentials stay unchanged; erased nonce history can require network
 or device reprovisioning before further joins are accepted.
+
+### Remote reboot confirmation
+
+1. Generate a request: `python3 tools/downlink.py reboot-request --id 60`.
+2. Read `reboot_confirmation_code` from the decoded challenge uplink/MQTT output.
+3. Confirm using a new request ID and the actual received code:
+   `python3 tools/downlink.py reboot-confirm --id 61 --code 654321`.
+
+Reboot uses command IDs 7/8 and challenge kind 4; factory-reset IDs 5/6 and kind 3
+are unchanged. Update the console decoder to recognize reboot challenges and the
+new `reboot_confirmation_pending` status field. JavaScript downlink helper names
+are `reboot_request` and `reboot_confirm`.
+
+Only one reboot or factory-reset challenge may be pending. Another request
+returns busy. A confirmation for the other operation returns conflict, even if
+its code matches; a wrong code leaves the current request pending. Both actions
+use the same two-hour request-origin expiry, duplicate handling, and ordinary
+Class A reporting windows. Expiry also invalidates an unsent queued challenge.
+
+Confirmed reboot stops radio work, cooperatively stops acquisition (up to
+10 seconds), and resets the MCU without erasing or replacing persisted settings,
+calibration, or nonce history. A stop timeout halts radio work and logs an ERROR.
+No final RF acknowledgement is required. Normal reboot discards RAM ring/history,
+learning and session state; saved preferences/calibration and retained nonces are
+used during normal startup and a fresh OTAA join.
 
 ## Historical formats
 

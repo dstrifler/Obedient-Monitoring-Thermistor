@@ -1,8 +1,8 @@
 # Obedient Monitoring Thermistor — Software Constitution
 
-**Revision:** 3  
+**Revision:** 4  
 **Established:** October 23, 2026 (America/Chicago)  
-**Updated:** October 23, 2026 (America/Chicago)  
+**Updated:** October 24, 2026 (America/Chicago)  
 **Status:** Owner authorized implementation against the wizard decisions. Engineering work is
 identified in [Section 12](#12-decisions-and-remaining-engineering-work).
 
@@ -43,7 +43,7 @@ provides the derived air-quality estimates.
 
 The firmware shall:
 
-- Keep acquisition, history, scheduling, encoding, radio work, and management
+- Keep acquisition, history, scheduling, encoding, radio work, Serial logging, and management
   behind clear service interfaces.
 - Continue collecting measurements independently of RF reporting frequency.
 - Preserve every supported measurement; validity is explicit, and zero is not
@@ -52,14 +52,17 @@ The firmware shall:
   for individual measurements.
 - Use fixed, bounded RAM for history, with no sensor-history writes to flash.
 - Remain correct across timer rollover and ordinary radio/sensor failures.
-- Preserve standard `.h`/`.cpp` splits for firmware modules.
+- Use exactly one public `.h` and one implementation `.cpp` per service, plus
+  `common.h/.cpp` for shared programming. Do not create sub-service source/header
+  pairs or move implementation into additional included source fragments.
 - Work with unmodified third-party libraries and Arduino core source. Supported
   build configuration, including the BSEC linker override, is permitted.
 
 ## 3. Service boundaries
 
-There are **six services**. A service may have multiple implementation modules;
-that does not create another service or move its responsibilities elsewhere.
+There are **seven services**. Each owns one combined `.h/.cpp` pair. Supporting
+implementation belongs inside its owning service's `.cpp`, with private helpers
+and classes as needed; there are no separately compiled sub-services.
 
 | Service | Owns | Boundary |
 | --- | --- | --- |
@@ -69,6 +72,38 @@ that does not create another service or move its responsibilities elsewhere.
 | LoRa | Radio initialization; activation; joins/rejoins; transmission; Class A receive windows; protocol eligibility; radio recovery; transaction results | Does not choose the application's dynamic/fixed reporting policy or perform application settings changes |
 | Storage | EEPROM/flash initialization and I/O; application settings records; calibration-state persistence; nonce journal and durable reservations; RAM ring and consistent access | Does not interpret sensor calibration, decide when to report, or operate the radio |
 | Sensor | Sensor bus access; acquisition; BSEC processing; validation; calibration/readiness logic; providing completed records and calibration blobs | Does not schedule RF reports or access EEPROM/flash directly |
+| Logging | Serial initialization; runtime verbosity subject to a build-time ceiling; message formatting; bounded queueing; severity-aware overflow accounting; nonblocking, time/byte-bounded draining and Serial backpressure | Serial only; does not write files/flash, acquire measurements, schedule RF, or perform radio protocol work |
+
+### Required source layout
+
+| Files | Responsibility |
+| --- | --- |
+| `core_service.h/.cpp` | Core/management, including private crystal timing implementation |
+| `sensor_service.h/.cpp` | Sensor acquisition, BSEC worker, validation, and calibration decisions |
+| `storage_service.h/.cpp` | RAM ring and all private EEPROM, calibration-record, and nonce-journal backends |
+| `scheduler_service.h/.cpp` | Reporting policy and deadlines |
+| `encoder_service.h/.cpp` | Packet encoding and application command decoding |
+| `lorawan_service.h/.cpp` | LoRa lifecycle, private Apollo3 HAL, crystal-radio startup, and rollover guards |
+| `log_service.h/.cpp` | Cooperative Serial logging state machine |
+| `common.h/.cpp` | Shared data structures, enums, compile-time feature definitions, and small pure validation/conversion helpers |
+
+Service headers expose public contracts. Keep internal helpers, classes, and
+state private to the owning implementation. `common.*` is shared programming,
+not an eighth service: it must not own hardware, threads, mutable service state,
+persistent I/O, startup, radio recovery, or reporting policy. Include dependencies
+must remain acyclic; do not use common as a container for unrelated code.
+
+The Arduino `.ino` entry point, immutable `config.h`, and factory
+`settings_defaults.h` remain separate. Tests, tools, reference sketches, and
+unmodified third-party dependencies are outside this production-file rule.
+Other production support headers/pairs must be folded into the service or
+common pair that owns them; do not leave compatibility shims for removed files.
+
+Logging is another cooperative state-machine bolt-on serviced by core's main
+loop. It does not require its own RTOS thread. Acquisition workers and ISRs must
+not call the Serial sink or contend on its queue; main formats/emits diagnostics
+at safe points. Logging state must reflect disabled, idle, queued, and
+backpressured operation while preserving bounded work and radio timing.
 
 Core owns the system clock/crystal reference. Scheduler uses that time source;
 it does not create or calibrate another clock. RadioLib continues to own precise
@@ -89,6 +124,12 @@ flowchart LR
     LoRa -->|Application downlink| Codec
     Codec -->|Decoded command| Core
     Core -->|Persist settings or reset| Storage
+    Core -->|Start and service| Logging
+    Sensor -->|Main-thread diagnostics| Logging
+    Storage -->|Main-thread diagnostics| Logging
+    Scheduler -->|Diagnostics| Logging
+    Codec -->|Diagnostics| Logging
+    LoRa -->|Safe-point diagnostics| Logging
 ```
 
 LoRaWAN MAC commands remain RadioLib/LoRa work. Application settings downlinks
@@ -299,12 +340,13 @@ choices in this document; they are not permission to change those choices.
 | --- | --- |
 | `config.h` | Immutable firmware configuration: board pins, radio/LoRa settings, provisioning credentials, and other values outside the OTA application-settings interface |
 | `settings_defaults.h` | Factory defaults for OTA-adjustable application settings |
-| `app_settings.h` | Shared runtime settings structure and related value definitions |
+| `common.h/.cpp` | Shared runtime settings structure, value definitions, and pure validation helpers |
 | RAM | Active validated settings and current adaptive learning state |
 | Persisted settings record | Accepted application preferences restored at startup |
 
-Header filenames describe the intended separation; creating the headers is an
-implementation step, not a claim that they already exist in the deployed code.
+The common pair defines the settings contract; core owns active settings and
+storage owns the persisted record. Shared declarations do not transfer service
+ownership to common.
 
 Load valid saved settings at startup. Missing, corrupt, or incompatible
 application settings use the applicable defaults. Define schema migration
@@ -460,6 +502,9 @@ before an applicable join attempt; storage owns its persistence mechanics.
 Logging means **Serial output only**, using the common verbosity levels. No
 text log files or persistent sensor-history logging are part of this design.
 Logging must not determine sampling correctness or radio receive-window timing.
+The logging service owns its cooperative queue/drain state machine, including
+backpressure and dropped-message accounting. A reduced compile-time ceiling caps
+output without invalidating saved preferences or unrelated OTA settings.
 
 No blocking Serial, EEPROM/flash operations, or other mutex-using work belongs
 in an ISR. Define safe concurrency and bounded service access when implementing
@@ -470,7 +515,8 @@ a radio rejoin; each service reports its own condition for appropriate handling.
 
 When firmware implementation is requested, work in reviewable steps:
 
-1. Establish shared data/settings contracts and six-service interfaces.
+1. Establish shared data/settings contracts and seven-service interfaces with
+   exactly the source layout in Section 3.
 2. Separate immutable configuration, defaults, active settings, and storage I/O.
 3. Connect completed sensor acquisitions directly to the one-hour ring; verify
    RAM usage, record consistency, and calibration-state handoffs.
@@ -488,6 +534,10 @@ restoration, decoder compatibility, and deliberate reset behavior.
 
 In particular, acceptance must demonstrate:
 
+- Exactly seven service pairs plus common, private supporting implementations,
+  acyclic header contracts, and no production sub-service files/source fragments.
+- Cooperative Serial logging states, bounded queue/pump work, disabled output,
+  overflow accounting, and recovery from backpressure without timing changes.
 - Six minutes of elapsed learning and availability of all seven fields before
   the first sensor packet, while allowing calibration accuracy zero.
 - Startup health packets without accidentally opening the adaptive gate.
@@ -521,6 +571,7 @@ silently substitute a different functional choice.
 | D2 — Dynamic and missing data | Direct three-second records into a one-hour ring, with commit notifications. Derive behavior from ring history without a separate last-reported-value baseline. Moderate individual outliers; sustained unusual/fast activity increases reporting and steady streams reduce it. Allow partial reports after startup. All-unavailable and startup-wait status follows six minutes in dynamic mode or the selected interval in fixed mode. | Specify bounded calculations, smoothing/confidence, freshness/gap handling, and scenario-based acceptance cases; measure RAM/CPU/concurrency costs. |
 | D3 — Packets and OTA delivery | Atomic validated settings batches. Queue results/replies for the next eligible uplink even ahead of normal sensor reports. Defer complete sensor reports for capacity and service MAC exchanges as needed; do not truncate or fragment them. Preserve canonical values, preferences, and all measurements. | Specify versioned report/control layouts, command and response identifiers, request correlation, bounded queues, capacity checks, and decoder migration before changing deployed wire behavior. |
 | D4 — Settings and reset | Save/verify settings before activation; on failure keep existing active settings and report rejection. Accepted mode/interval changes start a fresh interval. Factory reset requires a six-digit challenge and matching second command within one hour from the initial request. Continue normal reporting without polling. After confirmation, erase/verify everything designated; bounded erase failure stops radio and is reported on Serial. No persistent reset marker. | Specify persistence/erase ordering, retry limits, request handling, and interrupted-write behavior consistent with the chosen RAM-only confirmation and marker-free reset; test failure paths before enabling destructive commands. |
+| D5 — Source organisation and logging | Seven services, including cooperative Serial-only logging. Exactly one combined .h/.cpp pair per service; no sub-service pairs or source fragments. common.h/.cpp holds shared contracts and pure helpers. Keep the Arduino entry point, immutable config and factory defaults separate. | Consolidate supporting implementations privately, enforce the file/header boundaries, exercise logging states and timing bounds, and verify crystal timing/radio startup preservation with host and board checks. |
 
 The one-hour ring and factory defaults remain agreed. Record sizing is an
 implementation feasibility check. If implementation would require a functional
@@ -533,3 +584,4 @@ compromise or a new product decision, amend this document before making it.
 | 1 | 2026-10-23 | Established six services, direct three-second acquisition-to-ring flow, one-hour RAM history, canonical measurement units with presentation preferences, factory defaults, calibration/persistence boundaries, OTA command scope, and marker-free complete reset. Kept unresolved startup, adaptive, protocol, and failure behaviors explicit. |
 | 2 | 2026-10-23 | Recorded wizard decisions for six-minute/all-seven startup, ring commit notifications and ring-based adaptive behavior, mode-specific health cadence, atomic saved settings, fresh intervals, prompt replies, complete-report deferral, and a RAM-only six-digit factory-reset challenge with one-hour expiry, ordinary reporting without polling, and bounded erase-failure halt. Separated resolved functional direction from required engineering specifications. |
 | 3 | 2026-10-23 | Owner authorized the firmware rewrite. Clarified that fixed-mode health packets occupy normal reporting slots through sensor loss/recovery; separate command replies do not reset sensor deadlines. No factory defaults or reset-confirmation choices changed. |
+| 4 | 2026-10-24 | Added logging as the seventh service with explicit cooperative Serial queue, verbosity, overflow, and backpressure ownership. Required one combined header/implementation pair per service, no sub-service pairs or source fragments, and common.h/.cpp for shared contracts/pure helpers. Preserve the Arduino entry point, immutable config, factory defaults, crystal discipline, and working crystal-radio startup during consolidation. |

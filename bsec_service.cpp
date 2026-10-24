@@ -1,7 +1,8 @@
 #include "firmware_features.h"
 #if SENSOR_SERVICE_ENABLED && SENSOR_BSEC_ENABLED
 #include "bsec_service.h"
-#include "bsec_state.h"
+#include "storage_service.h"
+#include <atomic>
 #include "config.h"
 #include "log_service.h"
 #include <Arduino.h>
@@ -16,6 +17,8 @@
 // Only public Bosch APIs are used. The worker owns the sensor and algorithm;
 // main owns Serial and calibration persistence, outside radio transactions.
 static Bme68x gBme;
+static std::atomic<bool> gStopRequested(false), gWorkerStopped(true);
+static constexpr uint32_t CALIBRATION_PROFILE = 0x26103304UL;
 static rtos::Mutex gBsecMutex;
 alignas(8) static unsigned char gWorkerStack[8192];
 static rtos::Thread gWorker(osPriorityNormal, sizeof(gWorkerStack), gWorkerStack, "bsec");
@@ -47,7 +50,7 @@ static uint32_t gLastTimeMs = 0;
 static int64_t gNextCallNs = 0;
 static bsec_bme_settings_t gSettings = {};
 static constexpr uint32_t SAVE_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
-static_assert(BSEC_MAX_STATE_BLOB_SIZE == BSEC_STATE_MAX_SIZE, "Review calibration record size");
+static_assert(BSEC_MAX_STATE_BLOB_SIZE == 238, "Review calibration record size");
 static_assert(SENSOR_I2C_ADDR == 0x76 || SENSOR_I2C_ADDR == 0x77, "Invalid BME68x address");
 
 static void diagnostic(int code) {
@@ -205,6 +208,7 @@ static void workerFetch(uint32_t now) {
   gHaveSnapshot = true;
   const bool canSave = !gSavePending;
   gBsecMutex.unlock();
+  storageAppend(sample, gTriggerMs + gWaitMs);
   if(canSave && sample.airQuality.iaqAccuracy == 3 && sample.airQuality.validMask == 7 &&
      sample.airQuality.stabilized && sample.airQuality.runIn &&
      (!gEverSaved || uint32_t(now - gLastSaveMs) >= SAVE_INTERVAL_MS)) {
@@ -257,24 +261,31 @@ static void workerStep() {
 }
 
 static void workerLoop() {
-  for(;;) { workerStep(); rtos::ThisThread::sleep_for(std::chrono::milliseconds(10)); }
+  while(!gStopRequested.load()) {
+    workerStep();
+    rtos::ThisThread::sleep_for(std::chrono::milliseconds(10));
+  }
+  gWorkerStopped.store(true);
 }
 
 void bsecStart() {
   if(gStarted) { return; }
-  gRestoreSize = bsecStateLoad(gRestore, sizeof(gRestore));
+  gRestoreSize = storageLoadCalibration(gRestore, sizeof(gRestore), CALIBRATION_PROFILE);
   const bool restored = gRestoreSize != 0;
   gEverSaved = restored;
   gLastSaveMs = millis();
   gLastTimeMs = millis();
   gTimeMs = gLastTimeMs;
   gRetryStartedMs = gLastTimeMs - 60000UL;
+  gStopRequested.store(false);
+  gWorkerStopped.store(false);
   if(gWorker.start(mbed::callback(workerLoop)) != osOK) {
+    gWorkerStopped.store(true);
     LOG_ERROR("Sensor", "BSEC worker could not start; sensor reports unavailable.");
     return;
   }
   gStarted = true;
-  LOG_INFO("Sensor", "BSEC enabled: 3-second acquisition, 60-second radio reports; calibration %s.",
+  LOG_INFO("Sensor", "BSEC enabled: 3-second acquisitions commit directly to RAM history; calibration %s.",
     restored ? "record found" : "starts fresh");
 }
 
@@ -303,9 +314,9 @@ void bsecPoll() {
   wasPresent = present;
   static uint32_t lastSaveAttempt = millis() - 60000UL;
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
-  static uint32_t lastLog = millis() - 60000UL;
+  // Value formatting belongs to the sensor facade, with active unit settings.
 #endif
-  uint8_t state[BSEC_STATE_MAX_SIZE] = {};
+  uint8_t state[BSEC_MAX_STATE_BLOB_SIZE] = {};
   uint16_t size = 0;
   gBsecMutex.lock();
   const int code = gDiagnostic;
@@ -319,35 +330,17 @@ void bsecPoll() {
   if(code) { LOG_WARN("Sensor", "BSEC/sensor status=%d; acquisition retries automatically.", code); }
   if(size) {
     lastSaveAttempt = millis();
-    if(!bsecStateSave(state, size)) {
+    if(!storageSaveCalibration(state, size, CALIBRATION_PROFILE)) {
       LOG_WARN("Sensor", "Calibration save failed; retry in 60 seconds.");
       gBsecMutex.lock();
       if(!gSavePending) { memcpy(gSave, state, size); gSaveSize = size; gSavePending = true; }
       gBsecMutex.unlock();
     }
   }
-#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
-  if(uint32_t(millis() - lastLog) >= 60000UL) {
-    lastLog = millis();
-    SensorSnapshot sample = {};
-    if(bsecLatest(&sample)) {
-      const long temperature = lroundf(sample.environment.temperatureC * 100.0f);
-      const unsigned long magnitude = temperature < 0 ? -temperature : temperature;
-      const unsigned long humidity = lroundf(sample.environment.humidityPct * 100.0f);
-      const unsigned long pressure = lroundf(sample.environment.pressurePa);
-      LOG_INFO("Sensor", "T=%s%lu.%02lu C, RH=%lu.%02lu %%, P=%lu.%02lu hPa, gas=%lu ohm (valid=%u).",
-        temperature < 0 ? "-" : "", magnitude / 100, magnitude % 100,
-        humidity / 100, humidity % 100, pressure / 100, pressure % 100,
-        (unsigned long)sample.environment.gasOhms, unsigned(sample.environment.gasValid));
-      const double vocPpb = double(sample.airQuality.breathVocEquivalentPpm) * 1000.0;
-      const unsigned long shownVoc = vocPpb <= UINT32_MAX ? (unsigned long)(vocPpb + 0.5) : UINT32_MAX;
-      LOG_INFO("Sensor", "BSEC sample: uptime=%lu s, valid=0x%X, IAQ=%u, accuracy=%u, CO2eq=%lu ppm, VOCeq=%lu ppb.",
-        (unsigned long)sample.sampleUptimeSeconds, unsigned(sample.airQuality.validMask),
-        unsigned(lroundf(sample.airQuality.iaq)), unsigned(sample.airQuality.iaqAccuracy),
-        (unsigned long)lroundf(sample.airQuality.co2EquivalentPpm),
-        shownVoc);
-    }
-  }
-#endif
+
+}
+bool bsecStop() {
+  gStopRequested.store(true);
+  return !gStarted || gWorkerStopped.load();
 }
 #endif

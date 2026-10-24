@@ -20,10 +20,11 @@ LogRecord gLogQueue[LOG_SLOTS];
 uint8_t gLogHead = 0, gLogCount = 0;
 uint32_t gLogDropped[6] = {};
 bool gLogReady = false, gLogDropNoticePending = false;
+LogLevel gRuntimeLevel = LogLevel(FW_LOG_LEVEL < 3 ? FW_LOG_LEVEL : 3);
 
 bool logEnabled(LogLevel level) {
   unsigned value = static_cast<unsigned>(level);
-  return value >= FW_LOG_LEVEL_ERROR && value <= FW_LOG_LEVEL;
+  return value >= FW_LOG_LEVEL_ERROR && value <= FW_LOG_LEVEL && value <= unsigned(gRuntimeLevel);
 }
 LogRecord& logAt(uint8_t index) { return gLogQueue[(gLogHead + index) % LOG_SLOTS]; }
 void logDropped(LogLevel level) {
@@ -56,6 +57,7 @@ void logDropNotice() {
 #else
   constexpr LogLevel level = LogLevel::ERROR;
 #endif
+  if(!logEnabled(level)) { gLogDropNoticePending = false; return; }
   logWrite(level, "Logger", "Dropped totals: ERROR=%lu WARN=%lu INFO=%lu DEBUG=%lu TRACE=%lu",
     static_cast<unsigned long>(gLogDropped[1]), static_cast<unsigned long>(gLogDropped[2]),
     static_cast<unsigned long>(gLogDropped[3]), static_cast<unsigned long>(gLogDropped[4]),
@@ -63,6 +65,14 @@ void logDropNotice() {
   gLogDropNoticePending = false;
 }
 } // namespace
+
+void logSetLevel(LogLevel level) {
+  if(unsigned(level) <= 5) {
+    gRuntimeLevel = LogLevel(unsigned(level) < FW_LOG_LEVEL ? unsigned(level) : FW_LOG_LEVEL);
+    if(gRuntimeLevel == LogLevel::OFF) { gLogHead = gLogCount = 0; gLogDropNoticePending = false; }
+  }
+}
+LogLevel logGetLevel() { return gRuntimeLevel; }
 
 void logBegin(unsigned long baud) {
   if(gLogReady) { return; }
@@ -135,6 +145,8 @@ void logHex(LogLevel level, const char* module, const uint8_t* data, size_t len)
   if(shown != len) { logWrite(level, module, "Hex dump truncated after 256 bytes."); }
 }
 #else
+void logSetLevel(LogLevel) {}
+LogLevel logGetLevel() { return LogLevel::OFF; }
 void logBegin(unsigned long) {}
 void logPump() {}
 uint32_t logDroppedCount(LogLevel) { return 0; }

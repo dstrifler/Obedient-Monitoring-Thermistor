@@ -3,40 +3,20 @@
 
 #include <stdint.h>
 
-struct SensorData {
-  float temperatureC;
-  float humidityPct;
-  float pressurePa;
-  uint32_t gasOhms;
-  bool gasValid;  // Gas resistance is usable only with valid/stable heater flags.
-};
-
-struct AirQualityData {
-  float iaq;
-  float co2EquivalentPpm;
-  float breathVocEquivalentPpm;
-  uint8_t validMask;  // bit 0 IAQ, bit 1 CO2-equivalent, bit 2 VOC-equivalent.
-  uint8_t iaqAccuracy;  // Bosch indicator: 0 initializing, 1 low, 2 medium, 3 high.
-  bool stabilized;
-  bool runIn;
-};
-
-struct SensorSnapshot {
-  SensorData environment;
-  AirQualityData airQuality;
-  uint32_t sampleUptimeSeconds;  // Acquisition time since boot; not Unix time.
-  bool temperatureHumidityCompensated;
-};
+#include "sensor_types.h"
+#include "settings_defaults.h"
 
 // Atomic snapshot of one acquisition, including derived outputs when available.
 bool sensorLatestSnapshot(SensorSnapshot* data);
 
-// Main-thread entry points. Default BSEC backend samples in its own worker at
-// the Bosch LP rate (3 seconds); raw fallback is cooperative and samples/minute.
+// Main-thread lifecycle/persistence/Serial. Completed acquisitions are committed
+// directly to storage by the backend; reporting never controls acquisition.
 void sensorStart();
-void sensorPoll();
+void sensorPoll(const AppSettings& settings = settingsDefaults());
+// Cooperative stop: caller polls until the acquisition worker has exited.
+bool sensorStop();
 
-// Copies the latest validated sample (10 s BSEC / 65 s raw fallback). Missing, failed,
+// Copies the latest validated sample (10 seconds). Missing, failed,
 // or stale acquisition returns false and leaves *data unchanged.
 bool sensorLatest(SensorData* data);
 

@@ -7,6 +7,7 @@
 // calls; snapshots cross threads under a mutex. Serial and flash stay on main.
 void bsecStart();
 void bsecPoll();
+bool bsecStop();
 bool bsecLatest(SensorSnapshot* data);
 bool bsecPresent();
 

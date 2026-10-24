@@ -149,7 +149,7 @@ static bool nonceStoreScan() {
   return activePage < 0 || gNonceStoreHasRecord;
 }
 
-bool nonceStoreBegin() {
+static bool nonceGeometryReady() {
   extern uint32_t __etext, __data_start__, __data_end__;
   uintptr_t imageEnd = reinterpret_cast<uintptr_t>(&__etext) +
     (reinterpret_cast<uintptr_t>(&__data_end__) - reinterpret_cast<uintptr_t>(&__data_start__));
@@ -162,8 +162,10 @@ bool nonceStoreBegin() {
     LOG_ERROR("Persistence", "Unsupported flash geometry.");
     return false;
   }
-  return nonceStoreScan();
+  return true;
 }
+
+bool nonceStoreBegin() { return nonceGeometryReady() && nonceStoreScan(); }
 
 static bool nonceWriteRecord(uint32_t offset, uint32_t magic, uint32_t sequence,
                              const uint8_t* nonces, uint32_t target = UINT32_MAX,
@@ -250,4 +252,18 @@ bool nonceStoreLoad(uint8_t* out, size_t capacity) {
   if(!gNonceStoreHasRecord || !out || capacity < sizeof(gNonceSaved)) { return false; }
   memcpy(out, gNonceSaved, sizeof(gNonceSaved));
   return true;
+}
+
+// Explicit reset authorization is enforced by management. Ordinary recovery
+// never calls this operation and never discards nonce history.
+bool nonceStoreErase() {
+  if(!nonceGeometryReady()) { return false; }
+  for(uint32_t page = 0; page < 2; ++page) {
+    if(gNonceFlash.erase(page * NONCE_PAGE_BYTES, NONCE_PAGE_BYTES) != 0) { return false; }
+  }
+  NonceRecord record;
+  for(uint32_t offset = 0; offset < 2 * NONCE_PAGE_BYTES; offset += sizeof(record)) {
+    if(gNonceFlash.read(&record, offset, sizeof(record)) != 0 || !nonceErased(record)) { return false; }
+  }
+  return nonceStoreScan();
 }

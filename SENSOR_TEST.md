@@ -1,10 +1,10 @@
-# Waveshare BME688 / Bosch BSEC bench test
+# Waveshare BME688 / six-service firmware bench test
 
-The default backend uses Bosch BSEC 2.6.1.0 for IAQ, CO2-equivalent and
-breath-VOC-equivalent, plus sensor-heat-compensated temperature/humidity where
-available, pressure and raw gas resistance. Radio reports are 24 bytes every
-minute, first sent 60 seconds after activation. See
-[ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md) for the wire contract/decoder.
+The firmware follows [SOFTWARE_DESIGN.md](SOFTWARE_DESIGN.md). BSEC acquires about
+every three seconds and commits directly to a one-hour RAM ring. Default RF
+reporting is adaptive (1–60 minutes, six-minute baseline). First sensor data
+requires six minutes from the first usable reading and all seven measurements;
+calibration accuracy zero is permitted. Health packets may precede sensor data.
 
 ## Wiring
 
@@ -19,128 +19,109 @@ Keep the existing I2C connection:
 | ADDR/MISO | Disconnected |
 | CS | Disconnected |
 
-This uses Wire1 and address 0x77, with the Waveshare breakout's default pull-ups.
-The Qwiic Wire connector is not used. Radio pins/SPI1 are unchanged.
+This uses Wire1 and address 0x77, with the Waveshare breakout pull-ups. The Qwiic
+Wire connector is not used. Radio pins/SPI1 and XTAL/RF-switch startup are
+preserved.
 
 ## Stock dependencies
 
-- SparkFun Apollo3 board package 2.2.1 (internal platform 2.0.0).
+- SparkFun Apollo3 package **2.2.1** (internal platform version 2.0.0).
 - RadioLib **7.1.2**.
 - Bosch **BME68x Sensor library 1.3.40408**.
 - Bosch **bsec2 1.10.2610**, containing BSEC **2.6.1.0**.
 
-Install the libraries through Arduino Library Manager or Arduino CLI. The build
-verifier checks Bosch's hard-float Cortex-M4 archive, public headers and
-bme688_sel_33v_3s_4d profile against the supported upstream release. Dependencies
-are used without source changes. [Bosch upstream](https://github.com/boschsensortec/Bosch-BSEC2-Library)
-provides the library and license.
+No third-party source changes are required. Bosch's stock hard-float Cortex-M4
+archive, public headers and BME688 3.3 V / three-second / four-day profile remain
+verified. See the [Bosch library](https://github.com/boschsensortec/Bosch-BSEC2-Library)
+for its license.
 
-## Arduino IDE setup on Linux
+## Update and Arduino IDE setup on Linux
 
-The stock Apollo3 core's linker recipe does not automatically link BSEC's
-precompiled archive. After installing the dependencies above, close Arduino IDE
-and run this once from the repository directory (Python 3 required):
+Close Arduino IDE before pulling this change, then reopen the updated `.ino`.
+Several old `.cpp`/`.h` modules are deliberately removed; do not restore old IDE
+tabs from unsaved buffers. Preserve your local `config.h` provisioning values.
+
+The stock Apollo3 core does not automatically link Bosch's archive. If the
+one-time IDE linker configuration is not already installed, run from the repo:
 
 ```sh
 python3 tools/configure-arduino-ide.py
 ```
 
-Reopen Arduino IDE, select LoRa Thing Plus expLoRaBLE, and use Verify and Upload
-normally. Arduino CLI is not required for this setup.
+Reopen Arduino IDE, select LoRa Thing Plus expLoRaBLE, and use Verify/Upload.
+Arduino CLI is not required. This helper installs a supported board-specific
+`boards.local.txt` override, links the stock archive, and protects the nonce
+journal flash boundary. Original core/library files remain unchanged. Rerun it
+after moving the repository/library or updating the board package.
 
-The helper creates a supported `boards.local.txt` override next to the installed
-Apollo3 `boards.txt`. Its settings apply only to expLoRaBLE: link Bosch's
-hard-float Cortex-M4 archive, enforce the nonce-journal flash boundary with
-`tools/nonce_guard.ld`, and limit the IDE's displayed upload capacity. The
-original core and library files stay unchanged. Existing local settings are
-preserved and backed up before the first change.
-
-The helper reads the IDE's sketchbook path from `~/.arduino15/preferences.txt`
-and discovers the installed Apollo3 package. If discovery is ambiguous, use
-`--platform-dir PATH` for the folder containing `platform.txt`/`boards.txt`,
-`--sketchbook-dir PATH` for your sketchbook, or `--bsec-dir PATH` for the Bosch
-library folder containing `library.properties`.
-
-Rerun after moving the repository or Bosch library, or updating the board
-package: the override contains absolute paths. Keep the repository available
-while building. To remove only these overrides, close the IDE and run:
+Discovery overrides: `--platform-dir PATH`, `--sketchbook-dir PATH`,
+`--bsec-dir PATH`. To remove only its managed configuration block:
 
 ```sh
 python3 tools/configure-arduino-ide.py --remove
 ```
 
-## Optional Arduino CLI build on Linux
-
-For a per-build alternative that does not install local board overrides,
-install [Arduino CLI](https://arduino.github.io/arduino-cli/latest/installation/)
-and run:
+The optional CLI build remains available:
 
 ```sh
 python3 tools/build-local.py
 ```
 
-If needed, --config-file PATH selects an Arduino CLI configuration that uses
-your installed Arduino sketchbook/packages. --bsec-dir PATH selects an
-unmodified BSEC library outside the usual sketchbook. --cli PATH and
---compiler-path PATH select existing tools; they do not install/change tools.
-
-The helper stages an IDE-compatible sketch name, checks dependencies, generates
-a private linker script, builds, and places firmware files in the sibling
-<repository-name>_build directory. It prints an explicit upload command:
-
-```sh
-arduino-cli upload --fqbn SparkFun:apollo3:lora_thing_plus --port /dev/ttyUSB0 --input-dir "../Obedient_Monitoring_Thermistor_build"
-```
-
-Use the actual output path/device port. Building does not upload automatically.
-Both build and upload use the same CLI configuration when one is required.
-
-In the managed build environment:
+It prints an explicit upload command and does not flash automatically. See
+`--help` for CLI/configuration/library/compiler/output overrides. The managed
+cloud build uses:
 
 ```sh
 BSEC_UPSTREAM=/path/to/Bosch-BSEC2-Library bash tools/check-board.sh
 ```
 
-Its default BSEC installation is
-$THERMISTOR_TOOLS_DIR/user/libraries/bsec2. BME68X_UPSTREAM can similarly select
-the stock sensor library. No third-party code or board-core files are modified
-by either build helper.
-
 ## First physical test
 
-1. Update/save the complete decoder before expecting the new fields in MQTT.
-2. Flash and open Serial at 115200. Expect BSEC startup, normal OTAA join, and
-   the first 24-byte FPort 1 report 60 seconds after joining.
-3. Confirm normal uplinks show SF9/BW125 (DR1). Leave network ADR disabled.
-4. Check all environmental values and the three estimates in decoded MQTT data.
-   VOC is an estimate in **ppm**; Serial displays rounded **ppb**.
-5. Watch IAQ accuracy/readiness. Accuracy 0 during initial calibration is
-   expected; it does not establish reliable air quality. There is no promised
-   fixed time to reach accuracy 3.
-6. Confirm sampling continues during joins/receive windows, stable reporting,
-   and no new Mbed fault. This concurrency needs physical validation.
-7. After calibration has been saved, reboot and check continued calibration
-   behavior. LoRaWAN still performs a fresh OTAA join with preserved nonces.
+1. Save the entire updated [decoder](decoders/environment_v1.js) in Helium before
+   expecting new packet fields. The new sensor packet is 25-byte v3; control and
+   health messages have an `A1` header. Historical v1/v2 still decode.
+2. Upload and open Serial at **115200 baud**. Expect unchanged crystal timing
+   verification, BSEC startup, and OTAA join during initialization.
+3. Watch the first six minutes of acquisition. No highest-calibration-accuracy
+   requirement is imposed, but all seven measurements must be available before
+   the first sensor report. Health packets do not open the adaptive gate.
+4. Confirm first sensor receipt in Helium/MQTT, then watch adaptive timing.
+   Ordinary sensor uplinks remain DR1, SF9/BW125, with network ADR disabled.
+5. Confirm factory presentation is Fahrenheit/inHg/ohms/ppb unless valid saved
+   preferences were restored. Canonical Celsius/Pa/ohms/ppm fields remain in
+   MQTT. Serial reports are approximately once/minute, independently of RF.
+6. Exercise `Get Configuration` and `Get Status`, then a harmless unit change
+   or fixed-interval batch using [the command builder](ENVIRONMENT_PACKET.md).
+   Verify the reply, fresh interval, persistence after reboot, and continued
+   acquisition/radio operation. Defaults mode is dynamic; fixed accepts 1–60.
+7. Check that a missing field after startup is flagged without losing other
+   fields. A total sensor failure uses six-minute health in dynamic mode or the
+   chosen interval in fixed mode. Restoring the sensor must not force a radio
+   rejoin merely because acquisition failed.
+8. After BSEC reports high accuracy and calibration has actually been saved,
+   reboot and verify calibration restore. LoRa still performs a fresh OTAA join
+   with durable nonce history. Ring history and learning restart in RAM.
 
-Temperature/humidity may differ from the former once/minute raw readings because
-sampling/heater cadence changes and Bosch compensates sensor self-heating. No
-board-specific offset is guessed. Move away from vents for room measurements.
-CO2-equivalent/VOC-equivalent are algorithm estimates, not independent gas
-concentrations or a substitute for a CO/exhaust detector.
+Do not use emergency reset as a routine settings test: it deliberately erases
+calibration and nonce history. Its two-command challenge, expiry, and failure
+semantics are documented in [ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md).
 
-Sensor errors retry after 60 seconds, clear stale data, and do not force a radio
-rejoin. BSEC runs only on a normal worker thread; Serial and EEPROM stay on the
-main thread. EEPROM calibration storage and nonce journal are independent.
+BSEC controls its heater/acquisition profile. Temperature/humidity may differ
+from the old once/minute raw mode due to sensor-heat compensation. No arbitrary
+board-temperature offset is applied. Equivalent gas outputs are estimates and
+IAQ confidence must be interpreted alongside accuracy/readiness. No fixed time
+to maximum calibration accuracy is promised.
 
-## Fallback builds
+## Host and fallback checks
 
-THERMISTOR_BSEC_ENABLED=0 selects the previous raw sensor backend with the
-guarded board script. It sends v2 environmental slots, with BSEC estimates
-unavailable. It samples once/minute and has no BSEC dependency. Setting
-THERMISTOR_SENSOR_ENABLED=0 builds without sensor dependencies/bus activity;
-reports retain their 24-byte format with all measurements unavailable.
+See [FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md) for the test commands,
+service map, adaptive method and persistence layout. Board compilation uses the
+actual stock Bosch binary; host BSEC tests simulate its opaque public API.
+Physical calibration, concurrent I2C/RF behavior, and Helium delivery still need
+the board tests above.
 
-Equivalent compile-time switches are in firmware_features.h. These fallbacks
-do not add adaptive reporting. Host raw-backend tests continue using the actual
-unmodified Bosch wrapper; BSEC tests use the real public headers with hardware
-and opaque algorithm calls simulated. Board builds link the actual ARM binary.
+`THERMISTOR_BSEC_ENABLED=0` with the board helper selects the raw backend;
+`THERMISTOR_SENSOR_ENABLED=0` selects radio/health only. The first-complete-report
+gate is unchanged: these diagnostics cannot produce all seven BSEC measurements,
+so they send health packets and, for raw mode, Serial readings. Compile-time
+feature switches remain in `firmware_features.h`.

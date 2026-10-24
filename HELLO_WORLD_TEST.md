@@ -1,3 +1,5 @@
+> Historical debugging notes. Current behavior is defined in [SOFTWARE_DESIGN.md](SOFTWARE_DESIGN.md); use [SENSOR_TEST.md](SENSOR_TEST.md) for builds and board checks.
+
 # Environmental uplink test and firmware architecture
 
 Hello World has been replaced by a fixed 11-byte environmental packet; see

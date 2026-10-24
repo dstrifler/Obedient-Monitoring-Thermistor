@@ -1,9 +1,10 @@
 # Obedient Monitoring Thermistor — Software Constitution
 
-**Revision:** 1  
+**Revision:** 2  
 **Established:** October 23, 2026 (America/Chicago)  
-**Status:** Agreed architectural and functional direction, with open decisions
-explicitly identified in [Section 12](#12-open-decisions).
+**Updated:** October 23, 2026 (America/Chicago)  
+**Status:** Functional wizard decisions recorded. Remaining engineering work is
+identified in [Section 12](#12-decisions-and-remaining-engineering-work).
 
 ## 1. Purpose and authority
 
@@ -12,13 +13,14 @@ It is the shared design reference for development, reviews, bug checks, and
 future changes. It describes the target design, not a claim that the current
 firmware already implements every requirement.
 
-Agreed requirements in this document guide implementation. Suggestions in the
-open-decisions register are not approved requirements. Resolve an open decision
-before implementing behavior that depends on it.
+Agreed requirements in this document guide implementation. The decision register
+records the selected behavior; its engineering work items identify specifications
+and verification still needed before the affected code or protocol changes.
 
-Implementation remains paused until the functional design is fully agreed.
-Previously started, unpublished implementation drafts do not establish design
-decisions and must be reconciled with this document before use.
+This revision updates the design only. Resume firmware implementation in
+separately requested, reviewable steps. Previously started, unpublished drafts
+do not establish design decisions and must be reconciled with this document
+before use.
 
 When behavior needs to change, discuss the change, amend this document, then
 implement and verify it in logical steps. A bug fix that restores documented
@@ -77,7 +79,7 @@ LoRaWAN protocol timing through the LoRa service.
 ```mermaid
 flowchart LR
     Sensor -->|Completed acquisition| Storage
-    Storage -->|History| Scheduler
+    Storage -->|Commit notification and history access| Scheduler
     Scheduler -->|Report request| Codec[Encoder / decoder]
     Storage -->|Latest record| Codec
     Core[Core / management] -->|Reporting settings| Scheduler
@@ -124,10 +126,19 @@ Storage provides consistent copies/access while acquisition and reporting run
 concurrently. Consumers must not observe partially written records. Missing
 acquisitions must not be fabricated or backfilled as successful readings.
 
+After committing a complete record, storage notifies scheduler that new data is
+available. The notification must not expose a partially committed record or
+make sensor acquisition wait for radio work. In dynamic mode scheduler evaluates
+the ring in response. In fixed mode it does not perform adaptive analysis for
+every commit; it uses the ring when a report is due or being prepared. Acquisition
+and ring commits continue in either mode. Scheduler timers remain operational
+even if no new records arrive, so missing-data/status reports still occur.
+
 The ring is RAM-only. A reboot or power loss discards it. Radio recovery alone
 does not discard history or restart acquisition. Reading failures are surfaced
-through validity, sensor status, and acquisition age/gaps; the exact
-all-measurements-unavailable reporting behavior remains open.
+through validity, sensor status, and acquisition age/gaps. The ring is the
+measurement history used by the dynamic algorithm; there is no separate
+last-reported-value baseline or duplicate measurement history to maintain.
 
 ## 5. Startup and reporting gates
 
@@ -136,22 +147,36 @@ Radio operations must not proceed with failed clock verification or unsafe
 nonce persistence. Invalid application settings may fall back to defaults;
 that is not permission to erase nonce history.
 
-Start sensor work and attempt the network join as soon as prerequisites permit.
-Joining and reporting must not determine the sensor acquisition cadence.
+Core starts LoRa during initialization after crystal timing is verified and
+storage prerequisites are satisfied. Joining may proceed whenever practical,
+independently of sensor learning. Joining and reporting must not determine the
+sensor acquisition cadence.
 
-The scheduler begins learning with the **first available reading**. The first
-sensor transmission waits until the node is joined and the startup data gate
-has been satisfied. Adaptive scheduling must not begin changing RF deadlines
-until both the startup data gate and the **first successful sensor-payload
-transaction** have completed.
+The scheduler begins learning with the **first usable reading**. The startup
+learning window is **six minutes of elapsed time** from that reading, nominally
+about 120 three-second acquisitions, not six three-second records.
 
-**The startup data gate requires a final decision.** The original agreement was
-six valid one-minute readings. Acquisition/storage has since changed to
-three-second records, and six such records represent only about 15–18 seconds.
-Retaining a six-minute learning window, approximately 120 records, was proposed
-but has not been explicitly selected. See decision D1.
+The first sensor transmission requires all of the following:
 
-For this gate, MAC-only exchanges do not count as the first sensor transmission.
+1. The node is joined and LoRa permits transmission.
+2. The six-minute learning window has elapsed.
+3. A fresh, coherent record has **all seven measurements available**. BSEC
+   calibration accuracy may still be zero; highest accuracy is not required.
+
+Do not add a separate fixed 60-second post-join settling delay. RadioLib still
+owns its protocol timing and eligibility checks. Adaptive scheduling must not
+begin changing RF deadlines until the startup gate and the **first successful
+sensor-payload transaction** have both completed.
+
+If the startup sensor-data gate cannot be satisfied, the joined node sends
+health/status packets while waiting: every **six minutes in dynamic mode**, or
+at the **selected reporting interval in fixed mode**. These packets contain
+device status, do not stand in for a complete first sensor report, and do not
+enable adaptive scheduling. They must remain possible even if no usable sensor
+reading has arrived to start the learning clock.
+
+For this gate, health/status packets, command replies, and MAC-only exchanges do
+not count as the first sensor transmission.
 A successful unconfirmed transaction means local completion, not proof of
 receipt by the network. Do not require confirmed uplinks merely to establish
 this gate.
@@ -169,20 +194,46 @@ saving those settings; scheduler does not read EEPROM on each evaluation.
 ### Dynamic behavior
 
 The preferred baseline is **six minutes**. Target intervals range from **one
-minute to one hour**. Unexpected or sudden changes should shorten reporting
-intervals promptly; predictable or stable conditions should allow longer
-intervals. Interval increases should be gradual enough to avoid oscillation.
+minute to one hour**. Calculate behavior from the live acquisition history in
+the ring. Repeated unusual results and sustained fast movement should
+progressively shorten intervals; fewer unusual results and steadier behavior
+should favor longer intervals.
 
-The algorithm shall consider available valid measurements independently and
-select one reporting schedule for the combined report. A missing gas or derived
-estimate must not prevent available temperature/humidity/pressure from being
-used. It must handle insufficient history and changing availability without
-requiring manually edited thresholds for individual measurements.
+**One unexpected reading must not wildly swing reporting timing.** Use the
+surrounding history and persistence of change to moderate outliers. Evaluate
+available measurements independently so sustained activity in a valid field is
+not hidden by steady or unavailable fields. No manually edited per-metric
+thresholds are required.
+
+Select one reporting schedule for the combined report. Do not require a
+separate comparison with values in the last transmitted packet. Scheduler
+still retains transmission times, deadlines, and necessary control state to
+enforce cadence; those are not another sensor history.
 
 Calculations must use acquisition times and actual elapsed time. Changing the
 number of records per minute must not silently redefine a rate of change.
-Exact mathematics, confidence rules, and fallback behavior remain to be agreed
-before implementing the algorithm (D2).
+Choose and document bounded mathematics, smoothing, and confidence rules during
+the implementation specification. They must satisfy these agreed behaviors and
+the acceptance cases in Section 11, without introducing new user-facing tuning.
+
+### Availability and insufficient data
+
+After the first complete sensor report, continue sending available measurements
+when some fields are unavailable. Flag missing fields explicitly. Availability
+changes may bring a report forward within the cadence limits; they must not
+turn a single transient observation into an uncontrolled timing swing.
+
+If all sensor measurements are unavailable after startup, report health/status
+every **six minutes in dynamic mode**. In **fixed mode**, honor the selected
+interval instead of overriding it with six minutes. Sensor recovery continues
+independently, and scheduler timers must not depend on ring commit notifications
+to detect that a report is due.
+
+When history is insufficient to support adaptation, use the six-minute baseline
+in dynamic mode rather than inventing precision or learning from invalid data.
+Fixed mode continues to honor its interval. Define and test data-age and gap
+criteria in the implementation specification; stale values are unavailable,
+never fresh readings replayed from an earlier ring entry.
 
 ### Report requests and outcomes
 
@@ -190,6 +241,10 @@ When a report is due, scheduler initiates the encoder. LoRa may defer the
 transaction if it is not joined or transmission is not permitted. LoRa returns
 the outcome and relevant eligibility information; scheduler plans the next
 application attempt.
+
+Queued command replies may use the next eligible application uplink before a
+normal sensor report is due. A command reply or health packet does not itself
+reset the normal sensor-report deadline or satisfy the first-sensor-report gate.
 
 Space application uplink attempts at least **one minute** apart, including
 retries after uncertain failures. RadioLib can perform protocol-required work
@@ -221,15 +276,20 @@ presentation units control formatted Serial output and decoded presentation.
 The receiving decoder obtains the unit preferences through the reporting
 protocol; it must not have to guess whether measurement values changed units.
 
-Keep field validity explicit. Do not present stale values as fresh, interpret
-an invalid slot's zero as a measurement, or silently discard measurements to
-fit a smaller payload. Encoding/capacity errors must be reported to the owning
-services for handling.
+Keep field validity explicit. Do not present stale values as fresh or interpret
+an invalid slot's zero as a measurement. If current radio capacity cannot fit a
+complete sensor report, **defer that complete report**, service MAC-only
+transactions when needed, and retry when permitted. Do not drop fields or split
+the sensor report into fragments. This retains the latest-record reporting
+model, not a backlog of old encoded reports. Encoding/capacity errors must be
+reported to the owning services for handling.
 
 The existing 24-byte v2 packet is the deployed baseline, not a promise that new
-preference/status metadata fits that unchanged format. Define versioning,
-layout, decoder migration, and capacity checks before changing the protocol
-(D3). MQTT integration continues to receive decoded sensor data.
+preference/status metadata fits that unchanged format. Define versioning, layout,
+command/response types, decoder migration, and capacity checks as engineering
+specifications before changing the protocol. MQTT integration continues to
+receive decoded sensor data. Wire-level assignments must preserve the functional
+choices in this document; they are not permission to change those choices.
 
 ## 8. Configuration and application settings
 
@@ -249,9 +309,10 @@ application settings use the applicable defaults. Define schema migration
 before changing persisted layouts. Firmware updates to factory defaults do
 not silently overwrite valid saved user preferences.
 
-OTA commands change active settings and persist accepted preferences through
-storage. They do not rewrite either configuration header. Learning a new
-dynamic interval does not itself constitute a new persisted user setting.
+OTA commands persist accepted preferences through storage and then change active
+settings, according to the transaction rules in Section 9. They do not rewrite
+either configuration header. Learning a new dynamic interval does not itself
+constitute a new persisted user setting.
 
 ### Agreed settings and defaults
 
@@ -283,24 +344,88 @@ The application command interface shall support:
   and current reporting interval.
 - **Reset application settings:** load factory application defaults while
   preserving calibration and nonce history.
-- **Emergency factory reset:** perform the complete reset below.
+- **Emergency factory reset:** request a challenge, then confirm the reset using
+  that challenge before any destructive work begins.
 
 Decoder owns byte-level parsing and format validation. Management owns semantic
 validation and applying the decoded command. Storage owns durable I/O.
 
-Exact command bytes, response/status packets, application timing, persistence
-failure handling, and the effect of changing reporting mode/interval on a
-pending deadline remain to be defined in D3/D4.
+### Settings transactions and reply timing
 
-### Emergency factory reset
+Allow one downlink to change several application settings together. Validate the
+**entire batch** before applying it. Invalid settings reject the whole batch;
+do not apply a subset of its valid fields.
 
-The agreed reset sequence is:
+Save and verify the proposed settings before activating them. If persistence or
+readback verification fails, **reject the batch, retain the existing active
+settings, and report the save failure**. Do not activate temporary RAM-only
+settings as though the command succeeded. The active-settings transaction is
+all-or-nothing; any power-loss guarantees for the physical storage procedure
+must be specified and tested rather than assumed.
+
+When a batch changing reporting mode or interval is successfully accepted,
+**start a fresh reporting interval from acceptance time**. Do not calculate the
+new deadline from the previous sensor transmission, and do not keep an old
+deadline for one more report. Preserve acquisition, ring history, and the
+startup gates. Format-only changes do not implicitly restart reporting timing.
+
+Queue an accepted/rejected result for a settings command, or the requested
+configuration/status reply, for the **next eligible application uplink**, even
+if the next normal sensor-report deadline is later. Such replies obey radio
+eligibility and the one-minute minimum between application uplink attempts.
+This gives Class A control responses an opportunity without changing the
+configured normal sensor cadence.
+
+Exact command identifiers, response layouts, request correlation, and queue
+handling are engineering specifications to document before protocol changes.
+
+### Emergency factory reset: request and confirmation
+
+The initial factory-reset request **does not authorize an immediate wipe**.
+Management enters a pending-confirmation state and generates a random
+**six-digit reset confirmation code**. Encoder/LoRa send that code in a queued
+challenge reply at the next eligible opportunity.
+
+Keep the pending code and reset-request state **in RAM only**. The confirmation
+period is **one hour total from receipt of the initial request**, including
+challenge delivery time. Repeating the same request must not silently extend
+that deadline.
+
+During the confirmation period:
+
+- **Continue normal sensor reports and normal acquisition/ring storage.** Do not
+  pause reports, accelerate the sensor schedule, or create reset-polling uplinks.
+- Remain in the existing Class A operating model. Receive the confirmation in
+  ordinary downlink windows opened by uplinks; do not introduce continuous
+  listening or require a Class C/library change.
+- Require a second reset command carrying the matching code for the current,
+  unexpired request. An invalid or expired code must not erase anything.
+- On timeout, invalidate the code and abandon the reset without erasing data.
+  Normal operation continues with its current settings and reporting schedule.
+- On reboot, the RAM-only challenge is lost; an old confirmation must not cause
+  a wipe without a current matching request.
+
+The node does not promise a confirmation receive opportunity before expiry:
+normal reports may be an hour apart, and RF eligibility/failures may delay them.
+The selected design intentionally does not add polling to avoid that possibility.
+An unconfirmed request simply expires without a reset.
+
+### Emergency factory reset: confirmed execution
+
+Only after valid confirmation:
 
 1. Stop active work cleanly.
-2. Erase persisted application settings, BSEC calibration, and nonce history.
-3. Clear RAM history, adaptive learning, session state, and pending work.
+2. Erase and verify persisted application settings, BSEC calibration, and nonce
+   history through storage.
+3. Clear RAM history, adaptive learning, session state, pending commands, and
+   the reset challenge.
 4. Load application defaults.
 5. Restart normal startup/join behavior using unchanged `config.h`.
+
+Erases have a **bounded retry limit**. If a required store repeatedly fails
+verification, stop radio work and report the failure on Serial until the device
+is serviced/restarted. Do not announce a successful reset, continue indefinitely
+retrying erasures, or resume radio work against unverified reset state.
 
 **Do not retain a reset marker or a persistent record that the wipe occurred.**
 Compiled configuration and firmware remain intact. Restarting normal join
@@ -308,8 +433,10 @@ behavior does not guarantee acceptance by the network: the same compiled OTAA
 credentials remain while nonce history has been erased. This consequence and
 the choice to retain no reset marker were explicitly accepted.
 
-The ordered erase procedure, handling of an erase failure or interrupted reset,
-and any response before reset must be specified before implementation (D4).
+The ordered erase procedure and retry counts must be specified and tested
+before implementation. Because there is no persistent reset marker, an
+interrupted erase has no promise of automatic reset resumption or rollback;
+the next boot uses normal storage integrity checks and startup behavior.
 
 ## 10. Calibration, persistence, and diagnostics
 
@@ -339,7 +466,7 @@ a radio rejoin; each service reports its own condition for appropriate handling.
 
 ## 11. Planned implementation order and acceptance
 
-After the remaining functional decisions are agreed, work in reviewable steps:
+When firmware implementation is requested, work in reviewable steps:
 
 1. Establish shared data/settings contracts and six-service interfaces.
 2. Separate immutable configuration, defaults, active settings, and storage I/O.
@@ -357,29 +484,49 @@ overwrite/concurrency, timer rollover, reporting bounds, MAC-only transactions,
 RF deferral/failures/recovery, settings validation/restoration, calibration
 restoration, decoder compatibility, and deliberate reset behavior.
 
+In particular, acceptance must demonstrate:
+
+- Six minutes of elapsed learning and availability of all seven fields before
+  the first sensor packet, while allowing calibration accuracy zero.
+- Startup health packets without accidentally opening the adaptive gate.
+- Commit notifications after complete writes, dynamic evaluation on new data,
+  and fixed-mode deadlines that continue even when no data arrives.
+- Limited timing influence from one outlier, progressively faster reporting
+  for sustained unusual/fast changes, and slower reporting for steady streams.
+- Partial-field reporting after startup, with six-minute total-failure health
+  reports in dynamic mode and the selected interval in fixed mode.
+- A fresh interval on accepted mode/interval changes; no active settings changes
+  when batch validation, saving, or verification fails.
+- Prompt queued command replies without violating the RF-attempt minimum.
+- Complete-report deferral rather than truncation or fragmentation.
+- Six-digit reset challenges, the one-hour request-origin expiry, continued
+  ordinary reports without polling, rejection of wrong/expired/stale codes,
+  verified complete erasure, and radio halt after bounded erase failures.
+
 A successful compile is not proof of physical sensor/radio behavior. Keep
 host/build evidence and board/network observations distinct. Do not modify
 third-party source to make the tests pass.
 
-## 12. Open decisions
+## 12. Decisions and remaining engineering work
 
-These entries record unresolved choices rather than authorizing suggestions.
-Resolve them before implementing the affected behavior.
+The functional choices raised in the design wizard are recorded below. The
+remaining work specifies and verifies how to implement them; it must not
+silently substitute a different functional choice.
 
-| ID | Decision needed | Context/proposal |
+| ID | Selected behavior | Required engineering work |
 | --- | --- | --- |
-| D1 | Startup data gate with three-second storage | Original gate: six valid one-minute readings. Proposed update: retain a six-minute learning window, approximately 120 records, rather than sending after six three-second records. Define validity requirements, first-reading timing, and any post-join settling period. |
-| D2 | Adaptive algorithm and insufficient-data behavior | Agree how learned noise, trends, sudden changes, availability, and confidence determine intervals. Six-minute unavailable/status reports after startup were proposed but not explicitly approved. Define acquisition gaps, stale data, and recovery behavior. |
-| D3 | Report and OTA wire contracts | Agree preference metadata, versioning, command/response bytes, status fields, decoder migration, and capacity handling. The deployed 24-byte v2 packet does not yet encode the newly agreed preferences. |
-| D4 | Settings transition and reset failure behavior | Agree when settings changes take effect, what happens to pending deadlines, how persistence failures are reported, and the ordered complete-reset procedure, including partial/interrupted erasures and any pre-reset response. No persistent reset marker is permitted. |
+| D1 — Startup | Learn for six minutes from the first usable reading. Require all seven measurements for the first sensor report, allowing accuracy zero. Start LoRa after crystal verification; no extra fixed post-join delay. Status packets do not unlock adaptation. | Define freshness and timestamp handling, gate state transitions, and consistent availability checks. |
+| D2 — Dynamic and missing data | Direct three-second records into a one-hour ring, with commit notifications. Derive behavior from ring history without a separate last-reported-value baseline. Moderate individual outliers; sustained unusual/fast activity increases reporting and steady streams reduce it. Allow partial reports after startup. All-unavailable and startup-wait status follows six minutes in dynamic mode or the selected interval in fixed mode. | Specify bounded calculations, smoothing/confidence, freshness/gap handling, and scenario-based acceptance cases; measure RAM/CPU/concurrency costs. |
+| D3 — Packets and OTA delivery | Atomic validated settings batches. Queue results/replies for the next eligible uplink even ahead of normal sensor reports. Defer complete sensor reports for capacity and service MAC exchanges as needed; do not truncate or fragment them. Preserve canonical values, preferences, and all measurements. | Specify versioned report/control layouts, command and response identifiers, request correlation, bounded queues, capacity checks, and decoder migration before changing deployed wire behavior. |
+| D4 — Settings and reset | Save/verify settings before activation; on failure keep existing active settings and report rejection. Accepted mode/interval changes start a fresh interval. Factory reset requires a six-digit challenge and matching second command within one hour from the initial request. Continue normal reporting without polling. After confirmation, erase/verify everything designated; bounded erase failure stops radio and is reported on Serial. No persistent reset marker. | Specify persistence/erase ordering, retry limits, request handling, and interrupted-write behavior consistent with the chosen RAM-only confirmation and marker-free reset; test failure paths before enabling destructive commands. |
 
-The one-hour ring and the factory defaults above are agreed; they are not open
-alternatives. Record-layout sizing is an implementation feasibility check. If
-that check requires a functional compromise, amend this document before making
-the compromise.
+The one-hour ring and factory defaults remain agreed. Record sizing is an
+implementation feasibility check. If implementation would require a functional
+compromise or a new product decision, amend this document before making it.
 
 ## 13. Amendment history
 
 | Revision | Date (America/Chicago) | Change |
 | --- | --- | --- |
 | 1 | 2026-10-23 | Established six services, direct three-second acquisition-to-ring flow, one-hour RAM history, canonical measurement units with presentation preferences, factory defaults, calibration/persistence boundaries, OTA command scope, and marker-free complete reset. Kept unresolved startup, adaptive, protocol, and failure behaviors explicit. |
+| 2 | 2026-10-23 | Recorded wizard decisions for six-minute/all-seven startup, ring commit notifications and ring-based adaptive behavior, mode-specific health cadence, atomic saved settings, fresh intervals, prompt replies, complete-report deferral, and a RAM-only six-digit factory-reset challenge with one-hour expiry, ordinary reporting without polling, and bounded erase-failure halt. Separated resolved functional direction from required engineering specifications. |

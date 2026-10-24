@@ -97,11 +97,13 @@ bool encoderDecode(const uint8_t* bytes, size_t size, DecodedCommand* command) {
       parsed.changedMask |= 1U << (key - 1);
       parsed.values[key - 1] = bytes[6 + 2 * i];
     }
-  } else if(parsed.type == CommandType::ConfirmReset) {
+  } else if(parsed.type == CommandType::ConfirmReset || parsed.type == CommandType::ConfirmReboot) {
     if(size != 8) { return false; }
     for(unsigned i = 4; i < 8; ++i) { parsed.confirmationCode = (parsed.confirmationCode << 8) | bytes[i]; }
     if(parsed.confirmationCode < 100000 || parsed.confirmationCode > 999999) { return false; }
-  } else if(parsed.type < CommandType::GetConfiguration || parsed.type > CommandType::RequestReset || size != 4) {
+  } else if((parsed.type != CommandType::GetConfiguration && parsed.type != CommandType::GetStatus &&
+             parsed.type != CommandType::ResetSettings && parsed.type != CommandType::RequestReset &&
+             parsed.type != CommandType::RequestReboot) || size != 4) {
     return false;
   }
   *command = parsed; return true;

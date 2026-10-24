@@ -140,10 +140,10 @@ bool lwTimerRolloverPending() {
 
 // LoRa transport and lifecycle.
 namespace {
-bool lwBegin();
+int16_t lwBegin();
 bool lwIsActivated();
 int16_t lwRestore();
-bool lwRecover();
+int16_t lwRecover();
 bool lwActivate();
 int16_t lwLastActivationState();
 bool lwPersistenceHealthy();
@@ -227,15 +227,16 @@ static bool lwRadioHalHealthy() {
   return false;
 }
 
-bool lwBegin() {
+// Return the failing initialization step's error, or NONE after full setup.
+int16_t lwBegin() {
   if((LORA_UPLINK_FPORT == 0) || (LORA_UPLINK_FPORT > 223)) {
     LOG_ERROR("LoRaWAN", "Invalid uplink FPort. Must be 1..223.");
-    return false;
+    return RADIOLIB_ERR_INVALID_PORT;
   }
 
   if(LORA_USE_SPI != 1) {
     LOG_ERROR("LoRaWAN", "SPI bus disabled or missing in LORA_CONFIG.");
-    return false;
+    return RADIOLIB_ERR_INVALID_MODE;
   }
 
   LOG_DEBUG("LoRaWAN", "Initializing radio with XTAL reference.");
@@ -244,10 +245,10 @@ bool lwBegin() {
   // the default 1.6 V TCXO control on DIO3.
   gRadio.XTAL = true;
   int16_t radioState = gRadio.begin();
-  if(!lwRadioHalHealthy()) { return false; }
+  if(!lwRadioHalHealthy()) { return LW_ERR_RADIO_GPIO; }
   if(radioState != RADIOLIB_ERR_NONE) {
     LOG_WARN("LoRaWAN", "Radio initialization failed: code=%d", int(radioState));
-    return false;
+    return radioState;
   }
 
   // Many SX126x boards (including LoRa Thing Plus variants) route
@@ -256,7 +257,7 @@ bool lwBegin() {
   int16_t state = gRadio.setDio2AsRfSwitch();
   if((state != RADIOLIB_ERR_NONE) && (state != RADIOLIB_ERR_UNSUPPORTED)) {
     LOG_WARN("LoRaWAN", "RF switch setup failed: code=%d", int(state));
-    return false;
+    return state;
   }
 
 #if (LORA_USE_OTAA == 1)
@@ -275,7 +276,7 @@ bool lwBegin() {
 
   if(state != RADIOLIB_ERR_NONE) {
     LOG_WARN("LoRaWAN", "Node begin failed: code=%d", int(state));
-    return false;
+    return state;
   }
 
   // Application reports use US915 DR1 (SF9/BW125). Join rates remain under
@@ -283,7 +284,7 @@ bool lwBegin() {
   // stock RadioLib can process a server LinkADRReq even with ADR disabled.
   gNode.setADR(false);
   LOG_INFO("LoRaWAN", "Radio and OTAA node initialized; normal uplinks use DR1.");
-  return true;
+  return RADIOLIB_ERR_NONE;
 }
 
 bool lwIsActivated() {
@@ -329,14 +330,15 @@ int16_t lwRestore() {
 // ACTIVATE / JOIN NETWORK
 // ============================================================
 
-bool lwRecover() {
-  if(!gPersistenceHealthy) { return false; }
+int16_t lwRecover() {
+  if(!gPersistenceHealthy) { return LW_ERR_PERSISTENCE; }
   // The scheduler calls this only after its receive-window cooldown. Recreate
   // our node through its constructor, then use the normal public init/restore
   // APIs. No session counters are reused after discarding an uncertain session.
   gNode = PersistentLoRaWANNode(&gRadio, &gRegion, LORA_SUB_BAND);
-  if(!lwBegin()) { return false; }
-  return lwRestore() == RADIOLIB_ERR_NONE && gPersistenceHealthy;
+  const int16_t initialized = lwBegin();
+  if(initialized != RADIOLIB_ERR_NONE) { return initialized; }
+  return lwRestore();
 }
 
 bool lwActivate() {
@@ -563,15 +565,20 @@ void lwServicePoll() {
   }
   serviceTick = now;
   switch(serviceState) {
-    case RadioState::Initializing:
+    case RadioState::Initializing: {
       if(initAttempts && uint32_t(now - phaseStarted) < (1000UL << (initAttempts - 1))) { return; }
-      if(lwBegin()) {
+      const int16_t initialized = lwBegin();
+      if(initialized == RADIOLIB_ERR_NONE) {
         const int16_t restored = lwRestore();
         if(!lwPersistenceHealthy() || restored < 0) { radioFault(restored); return; }
         serviceState = RadioState::Joining; joinedAttempted = false;
-      } else if(++initAttempts >= 3) { radioFault(RADIOLIB_ERR_CHIP_NOT_FOUND); }
+      } else {
+        serviceError = initialized;
+        if(++initAttempts >= 3) { radioFault(initialized); }
+      }
       phaseStarted = millis();
       return;
+    }
     case RadioState::Joining:
       if(lwIsActivated()) { serviceState = RadioState::Ready; return; }
       if(joinedAttempted && uint32_t(now - lastJoin) < 60000UL) { return; }
@@ -594,11 +601,17 @@ void lwServicePoll() {
     case RadioState::Rollover:
       if(now < phaseStarted) { cooldown(); }
       return;
-    case RadioState::Cooldown:
+    case RadioState::Cooldown: {
       if(uint32_t(now - phaseStarted) < RECOVERY_MS) { return; }
-      if(lwRecover()) { serviceState = RadioState::Joining; joinedAttempted = false; capacityTried = 0; }
-      else if(!lwPersistenceHealthy() || ++recoveryAttempts >= 3) { radioFault(LW_ERR_PERSISTENCE); }
+      const int16_t recovered = lwRecover();
+      if(recovered == RADIOLIB_ERR_NONE) { serviceState = RadioState::Joining; joinedAttempted = false; capacityTried = 0; }
+      else {
+        // A radio/SPI failure must not be mislabeled as lost nonce history.
+        serviceError = recovered;
+        if(!lwPersistenceHealthy() || ++recoveryAttempts >= 3) { radioFault(recovered); }
+      }
       phaseStarted = millis(); return;
+    }
     default: return;
   }
 }

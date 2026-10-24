@@ -25,6 +25,7 @@ bool clockOkay=true,clockChecked=false,radioReady=false,joinOkay=true,sensorOkay
 bool stopped=false,stopNever=false;unsigned reboots=0,stops=0;
 uint32_t acquired=0;uint64_t fullTime=0;SensorSnapshot source{};
 int txResult=0;size_t radioCapacity=53;uint32_t eligibility=0;
+uint32_t txDelay=2100;bool injectStatus=false;
 struct Packet {uint32_t time;std::vector<uint8_t> bytes;};std::vector<Packet> packets;
 uint32_t millis(){return ticks;}uint32_t micros(){return ticks*1000;}
 void acquire(){
@@ -59,7 +60,13 @@ RadioTransaction lwTransmit(const uint8_t* bytes,size_t n){
  RadioTransaction result={};result.result=txResult;result.macOnly=n>radioCapacity;
  result.applicationSent=txResult>=0&&!result.macOnly;
  packets.push_back({ticks,result.macOnly?std::vector<uint8_t>():std::vector<uint8_t>(bytes,bytes+n)});
- delay(2100);return result;
+ delay(txDelay);
+ if(injectStatus){
+  const uint8_t request[]={193,3,0,100};
+  memcpy(result.downlink,request,sizeof(request));result.downlinkSize=sizeof(request);
+  result.result=1;injectStatus=false;
+ }
+ return result;
 }
 #include "core_service.h"
 #include "lorawan_service.h"
@@ -75,6 +82,8 @@ void command(std::initializer_list<uint8_t> data){std::vector<uint8_t> bytes(dat
 void warmed(){appSetup();advance(363000);assert(sensors()==1&&schedulerFirstSensorSent());}
 void pendingReset(){command({193,5,0,50});assert(resetPending&&resetCode==654321);}
 void confirmReset(){command({193,6,0,51,0,9,251,241});}
+void pendingReboot(){command({193,7,0,60});assert(resetPending&&resetAction==ResetAction::Reboot&&resetCode==654321);}
+void confirmReboot(){command({193,8,0,61,0,9,251,241});}
 int main(int argc,char** argv){
  assert(argc==2);std::string test=argv[1];normal();flashState().acquisitionStopped=&stopped;
  if(test=="startup"){
@@ -167,8 +176,68 @@ int main(int argc,char** argv){
   assert(resetPending&&controls()==1&&sensors()==1); // Challenge only, no reset polling.
   command({193,5,0,50});assert(resetStarted==began); // Duplicate does not renew deadline.
   command({193,6,0,51,0,1,134,160});assert(resetPending&&flashState().erases==0); // Wrong code.
+  advance(3600000);assert(resetPending&&reboots==0&&flashState().erases==0);
   advance(3600000);assert(!resetPending&&reboots==0&&flashState().erases==0);
   confirmReset();assert(flashState().erases==0&&reboots==0);
+ }else if(test=="factory_confirmation_after_one_hour"){
+  warmed();pendingReset();delay(5400000); // A confirmation at 90 minutes is still valid.
+  confirmReset();advance(500);
+  assert(reboots==1&&flashState().erases==2&&stopped);
+ }else if(test=="reboot_preserves_persistence"){
+  AppSettings saved=settingsDefaults();saved.intervalMinutes=60;
+  saved.temperature=TemperatureUnit::Celsius;assert(storageSaveSettings(saved));warmed();
+  uint8_t cal[238]={7},nonces[18]={1};
+  assert(storageSaveCalibration(cal,238,0x26103304));assert(storageNonceBegin()&&storageNonceSave(nonces));
+  const std::vector<uint8_t> eepromBefore(EEPROM.bytes,EEPROM.bytes+sizeof(EEPROM.bytes));
+  const std::vector<uint8_t> journalBefore(flashState().bytes,flashState().bytes+sizeof(flashState().bytes));
+  const unsigned writes=EEPROM.puts;pendingReboot();
+  assert(nodeStatus().managerState==65&&replies[replyHead].kind==ReplyKind::RebootChallenge);
+  delay(5400000);confirmReboot();assert(lwServiceState()==RadioState::Stopped&&reboots==0);
+  advance(500);assert(reboots==1&&stopped&&stops==2&&flashState().erases==0);
+  assert(EEPROM.puts==writes&&std::equal(eepromBefore.begin(),eepromBefore.end(),EEPROM.bytes));
+  assert(std::equal(journalBefore.begin(),journalBefore.end(),flashState().bytes));
+  AppSettings loaded{};uint8_t calAfter[238]={},noncesAfter[18]={};
+  assert(storageLoadSettings(&loaded)&&settingsEqual(loaded,saved));
+  assert(storageLoadCalibration(calAfter,238,0x26103304)==238&&!memcmp(cal,calAfter,238));
+  assert(storageNonceLoad(noncesAfter,18)&&!memcmp(nonces,noncesAfter,18));
+ }else if(test=="confirmation_operation_binding"){
+  warmed();pendingReboot();const uint32_t began=resetStarted;
+  command({193,5,0,70});assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::Busy);
+  command({193,7,0,60});assert(resetStarted==began); // Cached request cannot renew the deadline.
+  confirmReset();assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::Conflict);
+  command({193,8,0,71,0,1,134,160});
+  assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::WrongCode);
+  assert(resetPending&&state==ManagerState::Running&&flashState().erases==0&&reboots==0);
+  confirmReboot();advance(500);assert(reboots==1&&flashState().erases==0);
+ }else if(test=="factory_rejects_reboot_confirmation"){
+  warmed();pendingReset();confirmReboot();
+  assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::Conflict);
+  command({193,7,0,70});assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::Busy);
+  assert(resetPending&&state==ManagerState::Running&&flashState().erases==0&&reboots==0);
+  confirmReset();advance(500);assert(reboots==1&&flashState().erases==2);
+ }else if(test=="reboot_expiry_and_no_polling"){
+  warmed();AppSettings saved=appSettings();saved.mode=ReportMode::Fixed;saved.intervalMinutes=60;
+  assert(storageSaveSettings(saved));const auto before=active;active=saved;schedulerSettingsChanged(before,active);
+  pendingReboot();const uint32_t began=resetStarted;
+  advance(120000);assert(resetPending&&controls()==1&&sensors()==1);
+  advance(3600000);assert(resetPending&&sensors()==2&&flashState().erases==0&&reboots==0);
+  assert(resetStarted==began);advance(3600000);
+  assert(!resetPending&&reboots==0&&flashState().erases==0&&state==ManagerState::Running);
+  command({193,7,0,60});
+  assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::Expired);
+  confirmReboot();assert(replies[(replyHead+replyCount-1)%QUEUE_SIZE].result==CommandResult::Expired);
+  assert(reboots==0&&flashState().erases==0);
+ }else if(test=="challenge_expiry_boundary" || test=="challenge_expiry_wrap"){
+  if(test=="challenge_expiry_wrap"){ticks=UINT32_MAX-60000;eligibility=ticks;fullTime=ticks;}
+  appSetup();pendingReboot();delay(7200000-1);expireReset();
+  assert(resetPending&&replies[replyHead].kind==ReplyKind::RebootChallenge);
+  delay(1);expireReset();assert(!resetPending&&resetCode==0);
+  assert(replies[replyHead].kind==ReplyKind::Result&&replies[replyHead].result==CommandResult::Expired);
+  assert(replies[replyHead].value==0&&reboots==0&&flashState().erases==0);
+ }else if(test=="reboot_stop_failure"){
+  warmed();pendingReboot();stopNever=true;confirmReboot();advance(11000);
+  assert(flashState().erases==0&&reboots==0&&lwServiceState()==RadioState::Stopped);
+  assert(state==ManagerState::Fault);
  }else if(test=="confirmed_reset"){
   warmed();uint8_t cal[238]={1};assert(storageSaveCalibration(cal,238,0x26103304));
   uint8_t nonces[18]={1};assert(storageNonceBegin() && storageNonceSave(nonces));pendingReset();confirmReset();advance(500);
@@ -224,6 +293,19 @@ int main(int argc,char** argv){
   }done.store(true);});
   while(!done.load()) {StoredReading r{};if(storageRead(0,&r))assert(r.sample.environment.gasOhms==uint32_t(r.sample.airQuality.co2EquivalentPpm));}
   writer.join();assert(commits>19000&&storageCount()<=1200);
+ }else if(test=="status_after_blocking_radio" || test=="status_after_radio_wrap"){
+  if(test=="status_after_radio_wrap"){ticks=UINT32_MAX-500000;eligibility=ticks;fullTime=ticks;}
+  warmed();command({193,2,0,90});injectStatus=true;txDelay=180000;
+  advance(61000); // GetStatus arrives in the receive window after a long transaction.
+  bool found=false;
+  for(unsigned i=0;i<replyCount;++i){
+   const auto& reply=replies[(replyHead+i)%QUEUE_SIZE];
+   if(reply.requestId==100){
+    found=true;assert(reply.kind==ReplyKind::Status);
+    assert(reply.status.uptimeSeconds==uint32_t(fullTime/1000));
+   }
+  }
+  assert(found&&!injectStatus);
  }else if(test=="timer_wrap"){
   ticks=UINT32_MAX-500000;eligibility=ticks;fullTime=ticks;warmed();advance(400000);
   assert(schedulerLearningComplete()&&sensors()>=1&&storageCount()>200);
@@ -238,8 +320,12 @@ CASES = ['startup', 'startup_missing', 'fixed_missing', 'fixed_cadence', 'fixed_
          'isolated_outlier', 'sustained_change', 'partial_and_total_failure', 'batch_and_fresh_interval',
          'availability_recovery', 'availability_loss_during_rf', 'transient_availability', 'fixed_partial_availability',
          'batch_rejection_and_dedup', 'capacity_and_failures', 'reset_expiry_and_no_polling',
+         'factory_confirmation_after_one_hour', 'reboot_preserves_persistence',
+         'confirmation_operation_binding', 'factory_rejects_reboot_confirmation',
+         'reboot_expiry_and_no_polling', 'challenge_expiry_boundary', 'challenge_expiry_wrap', 'reboot_stop_failure',
          'confirmed_reset', 'erase_failure', 'stop_failure', 'settings_and_calibration',
-         'legacy_settings', 'log_ceiling', 'concurrency', 'timer_wrap', 'clock_fault_and_uart', 'uart_backpressure']
+         'legacy_settings', 'log_ceiling', 'concurrency', 'timer_wrap', 'status_after_blocking_radio',
+         'status_after_radio_wrap', 'clock_fault_and_uart', 'uart_backpressure']
 with tempfile.TemporaryDirectory(prefix='monitor-system-') as temp:
     folder=Path(temp);prepare(folder)
     (folder/'core_management.inc').write_text((ROOT/'core_service.cpp').read_text().split('// Core management.\n',1)[1])

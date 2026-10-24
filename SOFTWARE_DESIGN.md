@@ -1,6 +1,6 @@
 # Obedient Monitoring Thermistor — Software Constitution
 
-**Revision:** 4  
+**Revision:** 5  
 **Established:** October 23, 2026 (America/Chicago)  
 **Updated:** October 24, 2026 (America/Chicago)  
 **Status:** Owner authorized implementation against the wizard decisions. Engineering work is
@@ -390,6 +390,8 @@ The application command interface shall support:
   preserving calibration and nonce history.
 - **Emergency factory reset:** request a challenge, then confirm the reset using
   that challenge before any destructive work begins.
+- **Remote reboot:** request a separate challenge, then confirm it before a
+  clean restart that preserves all persisted settings, calibration, and nonce history.
 
 Decoder owns byte-level parsing and format validation. Management owns semantic
 validation and applying the decoded command. Storage owns durable I/O.
@@ -431,7 +433,7 @@ Management enters a pending-confirmation state and generates a random
 challenge reply at the next eligible opportunity.
 
 Keep the pending code and reset-request state **in RAM only**. The confirmation
-period is **one hour total from receipt of the initial request**, including
+period is **two hours total from receipt of the initial request**, including
 challenge delivery time. Repeating the same request must not silently extend
 that deadline.
 
@@ -481,6 +483,22 @@ The ordered erase procedure and retry counts must be specified and tested
 before implementation. Because there is no persistent reset marker, an
 interrupted erase has no promise of automatic reset resumption or rollback;
 the next boot uses normal storage integrity checks and startup behavior.
+
+### Remote reboot: request and confirmation
+
+Reboot uses the same RAM-only random six-digit challenge, **two-hour deadline
+from the initial request**, ordinary reporting/Class A windows, duplicate-request
+handling, and expiry rules as factory reset. Only one reboot or factory-reset
+challenge may be pending; another request returns busy. Confirmation must match
+both the pending operation and its code: a reboot confirmation cannot authorize
+a factory erase, and a factory-reset confirmation cannot authorize a reboot.
+
+After valid reboot confirmation, stop radio work and cooperatively stop sensor
+acquisition, then restart the MCU **without erasing or replacing any persisted
+data**. A stop timeout leaves radio work halted and reports the failure on Serial.
+No final RF acknowledgement is required before restart. Ordinary RAM/session
+state is lost as on a normal restart; startup restores the saved application
+settings and calibration and uses retained nonce history for a fresh OTAA join.
 
 ## 10. Calibration, persistence, and diagnostics
 
@@ -551,9 +569,10 @@ In particular, acceptance must demonstrate:
   when batch validation, saving, or verification fails.
 - Prompt queued command replies without violating the RF-attempt minimum.
 - Complete-report deferral rather than truncation or fragmentation.
-- Six-digit reset challenges, the one-hour request-origin expiry, continued
+- Six-digit reset/reboot challenges, the two-hour request-origin expiry, continued
   ordinary reports without polling, rejection of wrong/expired/stale codes,
-  verified complete erasure, and radio halt after bounded erase failures.
+  operation-specific confirmation, persisted-data preservation on reboot,
+  verified complete factory erasure, and radio halt after bounded erase failures.
 
 A successful compile is not proof of physical sensor/radio behavior. Keep
 host/build evidence and board/network observations distinct. Do not modify
@@ -570,7 +589,7 @@ silently substitute a different functional choice.
 | D1 — Startup | Learn for six minutes from the first usable reading. Require all seven measurements for the first sensor report, allowing accuracy zero. Start LoRa after crystal verification; no extra fixed post-join delay. Status packets do not unlock adaptation. | Define freshness and timestamp handling, gate state transitions, and consistent availability checks. |
 | D2 — Dynamic and missing data | Direct three-second records into a one-hour ring, with commit notifications. Derive behavior from ring history without a separate last-reported-value baseline. Moderate individual outliers; sustained unusual/fast activity increases reporting and steady streams reduce it. Allow partial reports after startup. All-unavailable and startup-wait status follows six minutes in dynamic mode or the selected interval in fixed mode. | Specify bounded calculations, smoothing/confidence, freshness/gap handling, and scenario-based acceptance cases; measure RAM/CPU/concurrency costs. |
 | D3 — Packets and OTA delivery | Atomic validated settings batches. Queue results/replies for the next eligible uplink even ahead of normal sensor reports. Defer complete sensor reports for capacity and service MAC exchanges as needed; do not truncate or fragment them. Preserve canonical values, preferences, and all measurements. | Specify versioned report/control layouts, command and response identifiers, request correlation, bounded queues, capacity checks, and decoder migration before changing deployed wire behavior. |
-| D4 — Settings and reset | Save/verify settings before activation; on failure keep existing active settings and report rejection. Accepted mode/interval changes start a fresh interval. Factory reset requires a six-digit challenge and matching second command within one hour from the initial request. Continue normal reporting without polling. After confirmation, erase/verify everything designated; bounded erase failure stops radio and is reported on Serial. No persistent reset marker. | Specify persistence/erase ordering, retry limits, request handling, and interrupted-write behavior consistent with the chosen RAM-only confirmation and marker-free reset; test failure paths before enabling destructive commands. |
+| D4 — Settings, reset, and reboot | Save/verify settings before activation; on failure keep existing active settings and report rejection. Accepted mode/interval changes start a fresh interval. Factory reset and reboot require operation-specific six-digit challenges and matching second commands within two hours from the initial request. Only one challenge may be pending. Continue normal reporting without polling. Confirmed reboot preserves every persisted store; confirmed factory reset erases/verifies everything designated. Bounded erase failure stops radio and is reported on Serial. No persistent reset marker. | Specify persistence/erase ordering, retry limits, request handling, and interrupted-write behavior consistent with the chosen RAM-only confirmation and marker-free reset; verify reboot preservation and cross-operation rejection before enabling commands. |
 | D5 — Source organisation and logging | Seven services, including cooperative Serial-only logging. Exactly one combined .h/.cpp pair per service; no sub-service pairs or source fragments. common.h/.cpp holds shared contracts and pure helpers. Keep the Arduino entry point, immutable config and factory defaults separate. | Consolidate supporting implementations privately, enforce the file/header boundaries, exercise logging states and timing bounds, and verify crystal timing/radio startup preservation with host and board checks. |
 
 The one-hour ring and factory defaults remain agreed. Record sizing is an
@@ -585,3 +604,4 @@ compromise or a new product decision, amend this document before making it.
 | 2 | 2026-10-23 | Recorded wizard decisions for six-minute/all-seven startup, ring commit notifications and ring-based adaptive behavior, mode-specific health cadence, atomic saved settings, fresh intervals, prompt replies, complete-report deferral, and a RAM-only six-digit factory-reset challenge with one-hour expiry, ordinary reporting without polling, and bounded erase-failure halt. Separated resolved functional direction from required engineering specifications. |
 | 3 | 2026-10-23 | Owner authorized the firmware rewrite. Clarified that fixed-mode health packets occupy normal reporting slots through sensor loss/recovery; separate command replies do not reset sensor deadlines. No factory defaults or reset-confirmation choices changed. |
 | 4 | 2026-10-24 | Added logging as the seventh service with explicit cooperative Serial queue, verbosity, overflow, and backpressure ownership. Required one combined header/implementation pair per service, no sub-service pairs or source fragments, and common.h/.cpp for shared contracts/pure helpers. Preserve the Arduino entry point, immutable config, factory defaults, crystal discipline, and working crystal-radio startup during consolidation. |
+| 5 | 2026-10-24 | Extended the factory-reset confirmation window to two hours and added a separate two-step remote reboot with the same deadline and Class A delivery rules. Permit one pending operation, bind confirmation to its operation, and preserve all persisted data on reboot. |

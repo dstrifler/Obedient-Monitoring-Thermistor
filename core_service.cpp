@@ -186,13 +186,22 @@ ControlReply replies[QUEUE_SIZE];
 unsigned replyHead = 0, replyCount = 0, cacheNext = 0;
 struct CachedCommand { bool used; uint8_t bytes[19]; uint8_t size; ControlReply reply; };
 CachedCommand cache[CACHE_SIZE] = {};
+enum class ResetAction : uint8_t { FactoryReset, Reboot };
 bool resetPending = false;
+ResetAction resetAction = ResetAction::FactoryReset;
 uint32_t resetStarted = 0, resetCode = 0, stopStarted = 0;
 uint16_t resetRequestId = 0;
 uint8_t eraseAttempts = 0;
 uint32_t nextTick = 0, uptimeTick = 0, faultLogAt = 0;
 uint64_t uptimeMs = 0;
-constexpr uint32_t RESET_WINDOW_MS = 3600000UL;
+constexpr uint32_t RESET_WINDOW_MS = 7200000UL;
+
+bool isConfirmationChallenge(ReplyKind kind) {
+  return kind == ReplyKind::ResetChallenge || kind == ReplyKind::RebootChallenge;
+}
+ReplyKind pendingChallengeKind() {
+  return resetAction == ResetAction::Reboot ? ReplyKind::RebootChallenge : ReplyKind::ResetChallenge;
+}
 
 void managerFault(const char* reason) {
   LOG_ERROR("Core", "%s", reason);
@@ -203,12 +212,14 @@ void updateUptime() {
   const uint32_t now = millis(); uptimeMs += uint32_t(now - uptimeTick); uptimeTick = now;
 }
 NodeStatus nodeStatus() {
+  // Radio work may have blocked since the last management tick.
+  updateUptime();
   NodeStatus result = {};
   result.uptimeSeconds = uint32_t(uptimeMs / 1000ULL);
   result.ringCount = uint16_t(storageCount());
   result.reportIntervalSeconds = uint16_t(schedulerIntervalMs() / 1000UL);
   result.radioState = uint8_t(lwServiceState());
-  result.managerState = uint8_t(state) | (resetPending ? 0x80 : 0);
+  result.managerState = uint8_t(state) | (resetPending ? (resetAction == ResetAction::Reboot ? 0x40 : 0x80) : 0);
   result.radioError = lwServiceError();
   result.sampleAgeSeconds = UINT16_MAX;
   StoredReading last = {};
@@ -227,11 +238,11 @@ void expireReset() {
   resetPending = false; resetCode = 0;
   for(unsigned i = 0; i < replyCount; ++i) {
     auto& reply = replies[(replyHead + i) % QUEUE_SIZE];
-    if(reply.kind == ReplyKind::ResetChallenge && reply.requestId == resetRequestId) {
+    if(isConfirmationChallenge(reply.kind) && reply.requestId == resetRequestId) {
       reply.kind = ReplyKind::Result; reply.result = CommandResult::Expired; reply.value = 0;
     }
   }
-  LOG_INFO("Core", "Unconfirmed factory reset expired; normal reporting continues.");
+  LOG_INFO("Core", "Unconfirmed reset/reboot expired; normal reporting continues.");
 }
 AppSettings proposedSettings(const DecodedCommand& command) {
   AppSettings proposed = active;
@@ -279,8 +290,9 @@ void receiveCommand(const uint8_t* bytes, size_t size) {
     ControlReply reply = previous.reply;
     if(previous.size != size || memcmp(previous.bytes, bytes, size)) {
       reply = {}; reply.requestId = command.requestId; reply.command = command.type; reply.result = CommandResult::Conflict;
-    } else if(reply.kind == ReplyKind::ResetChallenge &&
-              (!resetPending || resetRequestId != reply.requestId || resetCode != reply.value)) {
+    } else if(isConfirmationChallenge(reply.kind) &&
+              (!resetPending || resetRequestId != reply.requestId || resetCode != reply.value ||
+               reply.kind != pendingChallengeKind())) {
       reply.kind = ReplyKind::Result; reply.result = CommandResult::Expired; reply.value = 0;
     }
     enqueue(reply); return;
@@ -292,18 +304,26 @@ void receiveCommand(const uint8_t* bytes, size_t size) {
     case CommandType::GetStatus: reply.kind = ReplyKind::Status; reply.status = nodeStatus(); break;
     case CommandType::ResetSettings: acceptSettings(settingsDefaults(), reply); break;
     case CommandType::RequestReset:
+    case CommandType::RequestReboot:
       if(resetPending) { reply.result = CommandResult::Busy; break; }
       resetStarted = millis(); resetCode = lwGenerateResetCode(); resetRequestId = command.requestId;
-      resetPending = true; reply.kind = ReplyKind::ResetChallenge; reply.value = resetCode;
-      LOG_WARN("Core", "Factory reset requested; confirmation expires in one hour. Normal reports continue.");
+      resetAction = command.type == CommandType::RequestReboot ? ResetAction::Reboot : ResetAction::FactoryReset;
+      resetPending = true; reply.kind = pendingChallengeKind(); reply.value = resetCode;
+      LOG_WARN("Core", "%s requested; confirmation expires in two hours. Normal reports continue.",
+               resetAction == ResetAction::Reboot ? "Reboot" : "Factory reset");
       break;
     case CommandType::ConfirmReset:
+    case CommandType::ConfirmReboot:
       if(!resetPending) { reply.result = CommandResult::Expired; }
+      else if((command.type == CommandType::ConfirmReboot) != (resetAction == ResetAction::Reboot)) {
+        reply.result = CommandResult::Conflict;
+      }
       else if(command.confirmationCode != resetCode) { reply.result = CommandResult::WrongCode; }
       else {
         // A confirmed reset does not wait indefinitely for another RF reply.
         lwServiceStop(); stopStarted = millis(); state = ManagerState::Stopping;
-        LOG_WARN("Core", "Factory reset confirmed; stopping acquisition before erase.");
+        LOG_WARN("Core", "%s confirmed; stopping acquisition before restart.",
+                 resetAction == ResetAction::Reboot ? "Reboot" : "Factory reset");
         return;
       }
       break;
@@ -312,10 +332,23 @@ void receiveCommand(const uint8_t* bytes, size_t size) {
   memcpy(saved.bytes, bytes, size); saved.reply = reply; cacheNext = (cacheNext + 1) % CACHE_SIZE;
   enqueue(reply);
 }
+void restartNode() {
+  resetPending = false; resetCode = 0;
+  logServiceDelay(100);
+  NVIC_SystemReset();
+  state = ManagerState::Fault; // Host fakes may return; hardware reset does not.
+}
 void resetStep() {
   if(state == ManagerState::Stopping) {
-    if(sensorStop()) { state = ManagerState::Erasing; eraseAttempts = 0; }
-    else if(uint32_t(millis() - stopStarted) >= 10000UL) { managerFault("Sensor did not stop; factory erase was not started."); }
+    if(sensorStop()) {
+      if(resetAction == ResetAction::Reboot) {
+        // A normal reboot bypasses storage erasure and default replacement.
+        LOG_WARN("Core", "Rebooting with persisted settings, calibration and nonce history retained.");
+        restartNode();
+      } else { state = ManagerState::Erasing; eraseAttempts = 0; }
+    } else if(uint32_t(millis() - stopStarted) >= 10000UL) {
+      managerFault("Sensor did not stop; reset/reboot was not started.");
+    }
     return;
   }
   if(state != ManagerState::Erasing) { return; }
@@ -326,9 +359,7 @@ void resetStep() {
   resetPending = false; resetCode = 0; replyCount = 0;
   memset(cache, 0, sizeof(cache)); active = settingsDefaults();
   LOG_WARN("Core", "All designated stores erased; restarting with factory defaults.");
-  logServiceDelay(100);
-  NVIC_SystemReset();
-  state = ManagerState::Fault; // Host fakes may return; hardware reset does not.
+  restartNode();
 }
 }
 const AppSettings& appSettings() { return active; }

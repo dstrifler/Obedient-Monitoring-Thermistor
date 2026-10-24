@@ -74,8 +74,11 @@ static constexpr uint8_t CONTROL_DOWNLINK_VERSION = 0xC1;
 static constexpr uint8_t CONTROL_UPLINK_VERSION = 0xA1;
 static constexpr size_t SENSOR_PACKET_BYTES = 25;
 enum class ReportKind : uint8_t { Sensor, Health, Control };
-enum class CommandType : uint8_t { SetBatch = 1, GetConfiguration, GetStatus, ResetSettings, RequestReset, ConfirmReset };
-enum class ReplyKind : uint8_t { Result, Configuration, Status, ResetChallenge };
+enum class CommandType : uint8_t {
+  SetBatch = 1, GetConfiguration, GetStatus, ResetSettings,
+  RequestReset, ConfirmReset, RequestReboot, ConfirmReboot
+};
+enum class ReplyKind : uint8_t { Result, Configuration, Status, ResetChallenge, RebootChallenge };
 enum class CommandResult : uint8_t { Accepted, Invalid, SaveFailed, Busy, Expired, WrongCode, Conflict };
 struct DecodedCommand {
   CommandType type;

@@ -174,9 +174,13 @@ preference; `logGetLevel()` returns the effective capped level.
 
 Reply and retry caches are bounded at eight entries each. Cached request IDs
 prevent repeated settings writes or deadline restarts within that window.
-Factory challenge state is RAM-only and expires one hour from the initial
-request. A duplicate does not renew it. Ordinary reports continue; no extra
-polling is introduced. Expiry/reboot invalidates the challenge without erasing.
+Factory-reset and reboot challenge state is RAM-only and expires two hours from
+the initial request. A duplicate does not renew it. Only one operation may be
+pending; confirmation must match both its type and six-digit code. Ordinary
+reports continue; no extra polling is introduced. Expiry/reboot invalidates the
+challenge without erasing, including any challenge still waiting in the reply
+queue. Reply kinds 3/4 distinguish factory-reset/reboot challenges; status bits
+7/6 respectively identify their pending state.
 
 Confirmed reset stops new radio work and requests cooperative worker exit.
 Storage is not erased while acquisition might still write. A stop timeout or
@@ -184,6 +188,12 @@ three erase-verification failures leaves radio stopped, with an ERROR on Serial
 at enabled log levels. Successful verified erase clears all designated stores
 and restarts without a persistent reset marker. No automatic recovery from an
 interrupted multi-store factory reset is promised.
+
+Confirmed reboot uses the same cooperative stop and ten-second stop timeout,
+then resets the MCU directly, bypassing the erase state entirely. Settings,
+calibration and nonce history remain byte-for-byte intact; normal startup
+restores them while RAM history/learning/session state starts fresh. Neither
+confirmed operation waits for another RF acknowledgement before restart.
 
 ## Checks
 

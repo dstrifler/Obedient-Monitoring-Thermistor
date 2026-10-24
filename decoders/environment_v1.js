@@ -114,12 +114,12 @@ function readU32(bytes, offset) {
   return bytes[offset] * 16777216 + bytes[offset + 1] * 65536 + bytes[offset + 2] * 256 + bytes[offset + 3];
 }
 function decodeControl(bytes) {
-  if (bytes.length < 10 || bytes[1] > 3 || bytes[5] > 6) { return {error: "Invalid control reply"}; }
+  if (bytes.length < 10 || bytes[1] > 4 || bytes[5] > 6) { return {error: "Invalid control reply"}; }
   var kind = bytes[1], length = kind === 1 ? 17 : kind === 2 ? 26 : 10;
   if (bytes.length !== length) { return {error: "Invalid control reply length"}; }
   var result = {
     packet_type: kind === 2 && bytes[4] === 0 ? "health" : "control",
-    control_version: 1, reply_type: ["result", "configuration", "status", "reset_challenge"][kind],
+    control_version: 1, reply_type: ["result", "configuration", "status", "reset_challenge", "reboot_challenge"][kind],
     request_id: readU16(bytes, 2), command: bytes[4],
     result: ["accepted", "invalid", "save_failed", "busy", "expired", "wrong_code", "conflict"][bytes[5]],
     value: readU32(bytes, 6)
@@ -142,13 +142,17 @@ function decodeControl(bytes) {
       report_interval_s: readU16(bytes, 16), valid_mask: bytes[18],
       iaq_accuracy: bytes[19] & 3, sensor_stabilized: !!(bytes[19] & 4),
       sensor_run_in_complete: !!(bytes[19] & 8), radio_state: bytes[20],
-      manager_state: bytes[21] & 127, reset_confirmation_pending: !!(bytes[21] & 128),
+      manager_state: bytes[21] & 63, reset_confirmation_pending: !!(bytes[21] & 128),
+      reboot_confirmation_pending: !!(bytes[21] & 64),
       radio_error: radioError & 32768 ? radioError - 65536 : radioError,
       sample_age_s: readU16(bytes, 24) === 65535 ? null : readU16(bytes, 24)
     };
-  } else if (kind === 3) {
-    if (result.value < 100000 || result.value > 999999) { return {error: "Invalid reset challenge"}; }
-    result.reset_confirmation_code = String(result.value);
+  } else if (kind === 3 || kind === 4) {
+    if (bytes[4] !== (kind === 3 ? 5 : 7) || result.value < 100000 || result.value > 999999) {
+      return {error: "Invalid confirmation challenge"};
+    }
+    if (kind === 3) { result.reset_confirmation_code = String(result.value); }
+    else { result.reboot_confirmation_code = String(result.value); }
   }
   return result;
 }
@@ -157,7 +161,8 @@ function decodeControl(bytes) {
 // not call this; use tools/downlink.py to generate console Base64 payloads.
 function encodeDownlink(input) {
   try {
-    var d = input.data, ids = {set: 1, configuration: 2, status: 3, defaults: 4, reset_request: 5, reset_confirm: 6};
+    var d = input.data, ids = {set: 1, configuration: 2, status: 3, defaults: 4, reset_request: 5, reset_confirm: 6,
+                             reboot_request: 7, reboot_confirm: 8};
     if (!d || !Object.prototype.hasOwnProperty.call(ids, d.command) ||
         typeof d.request_id !== "number" || d.request_id < 0 || d.request_id > 65535 || d.request_id !== Math.floor(d.request_id)) {
       return {errors: ["Provide a command and integer request_id (0..65535)"]};
@@ -183,7 +188,7 @@ function encodeDownlink(input) {
       }
       if (!count) { return {errors: ["Empty settings batch"]}; }
       bytes[4] = count;
-    } else if (d.command === "reset_confirm") {
+    } else if (d.command === "reset_confirm" || d.command === "reboot_confirm") {
       var code = Number(d.code);
       if (!isFinite(code) || code !== Math.floor(code) || code < 100000 || code > 999999) { return {errors: ["Invalid six-digit code"]}; }
       bytes.push(Math.floor(code / 16777216), Math.floor(code / 65536) % 256, Math.floor(code / 256) % 256, code % 256);

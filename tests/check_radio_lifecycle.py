@@ -16,11 +16,12 @@ CPP=r'''
 uint32_t ticks=0;thread_local bool inWorker=false;SerialFake Serial;
 uint32_t millis(){return ticks;}uint32_t micros(){return ticks*1000;}void delay(uint32_t n){ticks+=n;}
 bool beginWorks=true,joinWorks=true,recoveryWorks=true,persistence=true,activeRadio=false;
+int16_t beginError=RADIOLIB_ERR_SPI_CMD_FAILED,recoveryError=RADIOLIB_ERR_SPI_CMD_TIMEOUT;
 int16_t restored=0,activation=-1116,transmission=0;unsigned begins=0,joins=0,recoveries=0,txs=0;
 size_t capacity=53,lastBytes=0;uint32_t wait=0;bool capacityRestores=false;
-bool lwBegin(){++begins;return beginWorks;}bool lwIsActivated(){return activeRadio;}
+int16_t lwBegin(){++begins;return beginWorks?RADIOLIB_ERR_NONE:beginError;}bool lwIsActivated(){return activeRadio;}
 int16_t lwRestore(){return restored;}bool lwPersistenceHealthy(){return persistence;}
-bool lwRecover(){++recoveries;activeRadio=false;return recoveryWorks;}
+int16_t lwRecover(){++recoveries;activeRadio=false;return recoveryWorks?RADIOLIB_ERR_NONE:recoveryError;}
 bool lwActivate(){++joins;activeRadio=joinWorks;return joinWorks;}
 int16_t lwLastActivationState(){return activation;}
 size_t lwMaxPayloadBytes(){return capacity;}uint32_t lwTimeUntilUplink(){return wait;}
@@ -38,6 +39,7 @@ int main(int argc,char** argv){
  }else if(test=="initialization_failure"){
   beginWorks=false;start();ticks+=1000;lwServicePoll();ticks+=2000;lwServicePoll();
   assert(begins==3&&joins==0&&lwServiceState()==RadioState::Fault);
+  assert(lwServiceError()==beginError);
  }else if(test=="persistence_failure"){
   restored=LW_ERR_PERSISTENCE;start();assert(lwServiceState()==RadioState::Fault&&joins==0);
  }else if(test=="network_retry"){
@@ -55,8 +57,14 @@ int main(int argc,char** argv){
   assert(lwServiceState()==RadioState::Ready);
  }else if(test=="bounded_recovery"){
   start();transmission=RADIOLIB_ERR_SPI_CMD_TIMEOUT;for(unsigned i=0;i<3;++i)lwTransmit(data,25);
-  recoveryWorks=false;for(unsigned i=0;i<3;++i){ticks+=60000;lwServicePoll();}
+  recoveryWorks=false;for(unsigned i=0;i<3;++i){ticks+=60000;lwServicePoll();assert(lwServiceError()==recoveryError);}
   assert(recoveries==3&&lwServiceState()==RadioState::Fault);
+  assert(persistence&&lwServiceError()!=LW_ERR_PERSISTENCE);
+ }else if(test=="recovery_restore_failure"){
+  start();transmission=RADIOLIB_ERR_TX_TIMEOUT;for(unsigned i=0;i<3;++i)lwTransmit(data,25);
+  recoveryWorks=false;persistence=false;recoveryError=RADIOLIB_ERR_CHECKSUM_MISMATCH;
+  ticks+=60000;lwServicePoll();
+  assert(recoveries==1&&lwServiceState()==RadioState::Fault&&lwServiceError()==recoveryError);
  }else if(test=="capacity_and_mac"){
   start();capacity=0;auto t=lwTransmit(data,25);assert(t.macOnly&&!t.applicationSent&&lastBytes==0);
   capacity=53;transmission=RADIOLIB_ERR_PACKET_TOO_LONG;
@@ -79,6 +87,7 @@ with tempfile.TemporaryDirectory(prefix='radio-lifecycle-') as temp:
     folder=Path(temp);prepare(folder);(folder/'fixture.cpp').write_text(CPP+timer+'// Radio lifecycle is kept separate'+source+MAIN)
     exe=compile_host(folder,['fixture.cpp','log_service.cpp'],'radio')
     for case in ['join_without_settling','initialization_failure','persistence_failure','network_retry',
-                 'hardware_recovery','mixed_errors','bounded_recovery','capacity_and_mac','rollover','eligibility_and_stop','entropy']:
+                 'hardware_recovery','mixed_errors','bounded_recovery','recovery_restore_failure',
+                 'capacity_and_mac','rollover','eligibility_and_stop','entropy']:
         subprocess.run([str(exe),case],check=True)
         print('PASS:',case,flush=True)

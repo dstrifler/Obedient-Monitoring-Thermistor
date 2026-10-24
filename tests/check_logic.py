@@ -488,7 +488,7 @@ stock_methods = ''.join(radio_method(signature) for signature in (
     'RadioLibTime_t LoRaWANNode::timeUntilUplink()',
 ))
 
-recover = lw[lw.index('bool lwRecover()'):lw.index('bool lwActivate()')]
+recover = lw[lw.index('int16_t lwRecover()'):lw.index('bool lwActivate()')]
 
 STOCK_FAKE = r'''
 using RadioLibTime_t=uint32_t;
@@ -589,8 +589,8 @@ std::vector<uint32_t> sends;
 std::vector<size_t> lengths;
 bool clockBegin() { return true; }
 bool eepromBootstrap() { return true; }
-bool lwBegin() { return true; }
-bool lwRecover() { ++recoveries; if(!recoveryWorks)return false; activated=false;return true; }
+int16_t lwBegin() { return 0; }
+int16_t lwRecover() { ++recoveries; if(!recoveryWorks)return RADIOLIB_ERR_SPI_CMD_TIMEOUT; activated=false;return 0; }
 int16_t lwRestore() { return 0; }
 bool lwPersistenceHealthy() { return persistence; }
 int16_t lwLastActivationState() { return activationResult; }
@@ -635,10 +635,10 @@ bool nonceStoreSave(const uint8_t* p) {
  if(!saveWorks) { return false; }
  memcpy(durable,p,sizeof(durable));haveDurable=true;return true;
 }
-bool lwBegin() {
+int16_t lwBegin() {
  ++initializations;
  assert(!gNode.isActivated() && gNode.rxDelayStart==0 && gNode.rxDelayEnd==0);
- return initWorks;
+ return initWorks?0:RADIOLIB_ERR_SPI_CMD_FAILED;
 }
 int16_t lwRestore() {
  if(!loadWorks) { gPersistenceHealthy=false;return LW_ERR_PERSISTENCE; }
@@ -738,11 +738,11 @@ int main() {
  assert(lwActivate() && gNode.joinNonce==1 && durableLimit()==48);
  // Recreate our node and restore both the reserved bound and accepted JoinNonce.
  ticks+=60000;gNode.rxDelayStart=ticks;gNode.rxDelayEnd=ticks-1;
- assert(lwRecover() && !lwIsActivated() && gNode.nextDevNonce()==48 && gNode.joinNonce==1);
+ assert(lwRecover()==0 && !lwIsActivated() && gNode.nextDevNonce()==48 && gNode.joinNonce==1);
  assert(gNode.rxDelayStart==0 && gNode.rxDelayEnd==0);
  assert(lwActivate() && gRadio.attempted.back()==48 && durableLimit()==64);
  // A bad reservation buffer must stop joining if uncertain-nonce restore fails.
- assert(lwRecover());LoRaWANNode::joinReceiveResult=0;
+ assert(lwRecover()==0);LoRaWANNode::joinReceiveResult=0;
  assert(!lwActivate() && gNode.nextDevNonce()==65 && durableLimit()==80);
  gLWnonces[RADIOLIB_LORAWAN_NONCES_SIGNATURE]^=1;gRadio.joinResult=-42;
  assert(!lwActivate() && !gPersistenceHealthy && gLastActivationState==RADIOLIB_ERR_CHECKSUM_MISMATCH);
@@ -756,7 +756,7 @@ int main() {
  gNode.devNonce=100;gReservedNonceLimit=100;saveWorks=false;
  assert(!lwActivate() && !gPersistenceHealthy && gRadio.attempted.size()==attempts);
  gPersistenceHealthy=true;loadWorks=false;
- assert(!lwRecover() && !gPersistenceHealthy && !lwIsActivated());
+ assert(lwRecover()!=0 && !gPersistenceHealthy && !lwIsActivated());
 }
 ''')
 
@@ -824,7 +824,7 @@ sx_methods = (sx_method(sx_source, 'int16_t SX126x::modSetup(') +
               sx_method(sx_source, 'int16_t SX126x::begin(') +
               sx_method(sx2_source, 'int16_t SX1262::begin('))
 
-radio_begin = lw[lw.index('bool lwBegin()'):lw.index('bool lwIsActivated()')]
+radio_begin = lw[lw.index('int16_t lwBegin()'):lw.index('bool lwIsActivated()')]
 
 sx_fixture = r'''
 #define LORA_USE_OTAA 1
@@ -911,25 +911,25 @@ int main() {
  mod.hal=&hal;
  // Positive control: the stock default really would request a 1.6-V TCXO.
  assert(gRadio.begin()==0 && tcxoCalls==1 && selectedTcxo==1.6f);
- resetRadio();assert(lwBegin());
+ resetRadio();assert(lwBegin()==0);
  assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==1 && rfSwitchCalls==2 && !gNode.adr);
  // Recovery must reapply the profile even if the flag was cleared beforehand.
- resetRadio();assert(lwRecover());
+ resetRadio();assert(lwRecover()==0);
  assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==2 && restores==1 && constructions==2 && !gNode.adr);
  unsigned previousBegins=nodeBegins,previousRestores=restores;
- resetRadio();chipFound=false;assert(!lwRecover());
+ resetRadio();chipFound=false;assert(lwRecover()==RADIOLIB_ERR_CHIP_NOT_FOUND);
  assert(gRadio.XTAL && tcxoCalls==0 && nodeBegins==previousBegins && restores==previousRestores);
- resetRadio();configResult=RADIOLIB_ERR_SPI_CMD_FAILED;assert(!lwRecover());
+ resetRadio();configResult=RADIOLIB_ERR_SPI_CMD_FAILED;assert(lwRecover()==RADIOLIB_ERR_SPI_CMD_FAILED);
  assert(tcxoCalls==0 && nodeBegins==previousBegins && restores==previousRestores);
  // Fail the explicit RF-switch setup after the driver's own successful setup.
- resetRadio();failRfSwitchAt=2;assert(!lwRecover());
+ resetRadio();failRfSwitchAt=2;assert(lwRecover()==RADIOLIB_ERR_SPI_CMD_FAILED);
  assert(rfSwitchCalls==2 && nodeBegins==previousBegins && restores==previousRestores);
- resetRadio();nodeBeginResult=RADIOLIB_ERR_INVALID_MODE;assert(!lwRecover());
+ resetRadio();nodeBeginResult=RADIOLIB_ERR_INVALID_MODE;assert(lwRecover()==RADIOLIB_ERR_INVALID_MODE);
  assert(nodeBegins==previousBegins+1 && restores==previousRestores);
- resetRadio();assert(lwRecover() && tcxoCalls==0);
+ resetRadio();assert(lwRecover()==0 && tcxoCalls==0);
  assert(nodeBegins==previousBegins+2 && restores==previousRestores+1);
- resetRadio();restoreResult=LW_ERR_PERSISTENCE;assert(!lwRecover() && !gPersistenceHealthy);
- unsigned before=constructions;assert(!lwRecover() && constructions==before);
+ resetRadio();restoreResult=LW_ERR_PERSISTENCE;assert(lwRecover()==LW_ERR_PERSISTENCE && !gPersistenceHealthy);
+ unsigned before=constructions;assert(lwRecover()==LW_ERR_PERSISTENCE && constructions==before);
 }
 ''')
 

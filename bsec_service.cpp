@@ -132,11 +132,13 @@ static void workerFetch(uint32_t now) {
   if(count) { gBme.getData(raw); }  // Return value is fields remaining, not success.
   if(!count || !(raw.status & BME68X_NEW_DATA_MSK)) { return; }
   gPending = false;
-  if(!isfinite(raw.temperature) || raw.temperature < -40 || raw.temperature > 85 ||
-     !isfinite(raw.humidity) || raw.humidity < 0 || raw.humidity > 100 ||
-     !isfinite(raw.pressure) || raw.pressure < 30000 || raw.pressure > 110000) {
-    workerFailure(-1004, now); return;
-  }
+  const bool tphValid = isfinite(raw.temperature) && raw.temperature >= -40 && raw.temperature <= 85 &&
+    isfinite(raw.humidity) && raw.humidity >= 0 && raw.humidity <= 100 &&
+    isfinite(raw.pressure) && raw.pressure >= 30000 && raw.pressure <= 110000;
+  // A numeric failure belongs to this acquisition, not the entire device.
+  // Publish independently valid raw fields and keep the normal cadence. BSEC
+  // outputs are unavailable until a conversion has all required valid inputs.
+  if(!tphValid) { diagnostic(-1004); }
   SensorSnapshot sample = {};
   sample.environment = {raw.temperature, raw.humidity, raw.pressure, 0, false};
   const uint8_t gasMask = BME68X_GASM_VALID_MSK | BME68X_HEAT_STAB_MSK;
@@ -148,7 +150,7 @@ static void workerFetch(uint32_t now) {
   }
   const uint64_t completedMs = gTimeMs - uint32_t(now - gTriggerMs) + gWaitMs;
   sample.sampleUptimeSeconds = uint32_t(completedMs / 1000ULL);
-  if(gasValid) {
+  if(gasValid && tphValid) {
     bsec_input_t inputs[BSEC_MAX_PHYSICAL_SENSOR] = {};
     uint8_t nInputs = 0;
     const int64_t stamp = int64_t(completedMs) * 1000000LL;

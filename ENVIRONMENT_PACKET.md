@@ -65,6 +65,9 @@ Results: 0 accepted, 1 invalid, 2 save failed, 3 busy, 4 expired/no pending rese
 Result/challenge packets are 10 bytes. Configuration replies are 17 bytes:
 bytes 10–16 contain the seven setting values in the table below. They describe
 the complete active configuration after a successful batch or defaults reset.
+Serial verbosity is the saved preference. A deliberately lower compile-time
+`FW_LOG_LEVEL` caps actual output; it does not reject a valid preference or an
+unrelated settings batch. The default build includes all six levels.
 
 Status packets are 26 bytes:
 

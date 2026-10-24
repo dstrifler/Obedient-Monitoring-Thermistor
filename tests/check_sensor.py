@@ -141,8 +141,19 @@ int main(int argc,char** argv){
   const float invalid[]={NAN,INFINITY,-41,86,-1,101,29999,110001};
   for(unsigned i=0;i<8;++i){
    goodReading();if(i<4)reading.temperature=invalid[i];else if(i<6)reading.humidity=invalid[i];else reading.pressure=invalid[i];
-   convert();SensorData out=sentinel();assert(!sensorFetch(&out) && !sensorPresent());unchanged(out);
+   convert();SensorData out=sentinel();assert(sensorFetch(&out) && sensorPresent());
+   SensorSnapshot snapshot{};snapshot.environment=out;
+   const uint8_t missing=i<4?1:i<6?2:4;
+   assert(sensorValidMask(snapshot)==uint8_t(15 & ~missing));
+   assert(out.gasValid && out.gasOhms==12345);
   }
+ }else if(test=="partial_publication"){
+  reading.pressure=NAN;sensorStart();
+  while(ticks<12000){sensorPoll(display);ticks+=50;}
+  assert(initializations==1 && committed.size()==4 && triggers==4);
+  for(const auto& record:committed)assert(sensorValidMask(record)==0x0B);
+  goodReading();sensorPoll(display);ticks+=200;sensorPoll(display);
+  assert(initializations==1 && committed.size()==5 && sensorValidMask(committed.back())==0x0F);
  }else if(test=="gas_validity"){
   for(unsigned i=0;i<8;++i){
    goodReading();
@@ -189,7 +200,7 @@ with tempfile.TemporaryDirectory(prefix='raw-sensor-') as temp:
            'SPI.h':'#pragma once\n#include <cstdint>\nstruct SPIClass {uint8_t transfer(uint8_t v){return v;}};\n',
            'config.h':'#pragma once\n#define SENSOR_USE_WIRE1 1\n#define SENSOR_I2C_ADDR 0x77\n','fixture.cpp':FIXTURE}
     for name,text in files.items():(folder/name).write_text(text)
-    cases=['forced_sample','ready_timeout_retry','init_errors','numeric_validation','gas_validity',
+    cases=['forced_sample','ready_timeout_retry','init_errors','numeric_validation','partial_publication','gas_validity',
            'stale_data','rollover_and_logs','sample_cache','old_conversion']
     for level in [0,3,5]:
         exe=folder/'sensor'
@@ -198,4 +209,4 @@ with tempfile.TemporaryDirectory(prefix='raw-sensor-') as temp:
                         *[str(folder/name) for name in ['sensor_service.cpp','sensor_types.cpp','app_settings.cpp','log_service.cpp','bosch/bme68xLibrary.cpp','fixture.cpp']],
                         '-o',str(exe)],check=True)
         for case in cases:subprocess.run([str(exe),case],check=True)
-        print('PASS: 9 raw-sensor timing/validation/publication cases at log level',level,flush=True)
+        print('PASS:',len(cases),'raw-sensor timing/validation/publication cases at log level',level,flush=True)

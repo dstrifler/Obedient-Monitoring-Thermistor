@@ -16,12 +16,18 @@ uint32_t attemptAt = 0, blockedAt = 0, blockedFor = 0, retryFor = SCHEDULER_MIN_
 uint32_t lastEvaluation = 0;
 bool retryPending = false, haveEvaluation = false, freshInterval = false;
 bool availabilityPending = false;
+// Debounced readiness is scheduling state, not a second measurement history.
+// The first complete sensor report establishes all seven fields as available.
+uint8_t availabilityMask = 0;
 
 // Statistical working memory is reused, not another measurement history.
 // Thirty-second medians suppress isolated samples while preserving sustained
 // changes. All durable observations come from the one-hour storage ring.
 constexpr unsigned BIN_COUNT = 120, BIN_SAMPLES = 16;
 constexpr uint32_t BIN_MS = 30000UL;
+constexpr unsigned AVAILABILITY_SAMPLES = 3;
+constexpr uint32_t AVAILABILITY_SPAN_MS = 6000UL;
+constexpr uint32_t AVAILABILITY_WINDOW_MS = 30000UL;
 float bins[BIN_COUNT][7];
 bool valid[BIN_COUNT][7];
 float group[7][BIN_SAMPLES], scratch[BIN_COUNT];
@@ -57,6 +63,9 @@ uint32_t intervalFromHistory() {
   for(auto& count : groupCount) { count = 0; }
   const size_t count = storageCount();
   unsigned currentBin = 0;
+  unsigned availabilityCount[7] = {};
+  uint8_t newestMask = 0, consistentMask = 0x7F, qualifiedMask = 0;
+  uint32_t newestMs = 0, previousMs = 0;
   for(size_t offset = 0; offset < count; ++offset) {
     StoredReading record = {};
     if(!storageRead(offset, &record)) { break; }
@@ -64,18 +73,40 @@ uint32_t intervalFromHistory() {
     if(bin >= BIN_COUNT) { break; }
     if(bin != currentBin) { finishBin(currentBin); currentBin = bin; }
     const uint8_t mask = sensorValidMask(record.sample);
+    if(offset == 0) { newestMask = mask; newestMs = previousMs = record.acquiredMs; }
+    const uint32_t span = newestMs - record.acquiredMs;
+    if(span <= AVAILABILITY_WINDOW_MS) {
+      // Require consecutive matching acquisitions over elapsed time. Do not
+      // bridge a stale gap or treat one unexpected sample as a readiness change.
+      if(uint32_t(previousMs - record.acquiredMs) > STORAGE_FRESH_MS) { consistentMask = 0; }
+      consistentMask &= uint8_t(~(mask ^ newestMask));
+      for(unsigned m = 0; m < 7; ++m) {
+        const uint8_t bit = 1U << m;
+        if(consistentMask & bit) {
+          if(availabilityCount[m] < AVAILABILITY_SAMPLES) { ++availabilityCount[m]; }
+          if(availabilityCount[m] >= AVAILABILITY_SAMPLES && span >= AVAILABILITY_SPAN_MS) { qualifiedMask |= bit; }
+        }
+      }
+      previousMs = record.acquiredMs;
+    }
     for(unsigned m = 0; m < 7; ++m) {
       if((mask & (1U << m)) && groupCount[m] < BIN_SAMPLES) { group[m][groupCount[m]++] = metricValue(record.sample, m); }
     }
   }
   finishBin(currentBin);
   if(generation != storageGeneration()) { recordPending.store(true); return interval; }
-  float activity = 0; bool anyLearned = false, availabilityChanged = false;
+  // Compare qualified current readiness with the last evaluated readiness,
+  // rather than one arbitrary old bin. Coalesced notifications after blocking
+  // RF work still detect a sustained loss, and returning fields count too.
+  const bool availabilityChanged = firstSensor && ((availabilityMask ^ newestMask) & qualifiedMask);
+  if(firstSensor) {
+    availabilityMask = uint8_t((availabilityMask & ~qualifiedMask) | (newestMask & qualifiedMask));
+  }
+  float activity = 0; bool anyLearned = false;
   for(unsigned m = 0; m < 7; ++m) {
     // Recent 90 seconds are compared with the preceding available history.
     unsigned recent[3], recentCount = 0;
     for(unsigned i = 0; i < 3; ++i) { if(valid[i][m]) { recent[recentCount++] = i; } }
-    if(!valid[0][m] && valid[4][m]) { availabilityChanged = true; }
     if(recentCount < 2) { continue; }
     unsigned n = 0;
     for(unsigned i = 4; i + 1 < BIN_COUNT; ++i) {
@@ -116,7 +147,7 @@ void schedulerStart() {
   interval = SCHEDULER_BASE_MS;
   reportAnchor = healthAnchor = millis(); lastEvaluation = reportAnchor;
   blockedAt = blockedFor = attemptAt = 0; retryFor = SCHEDULER_MIN_MS;
-  availabilityPending = false; currentMode = ReportMode::Dynamic;
+  availabilityPending = false; availabilityMask = 0; currentMode = ReportMode::Dynamic;
   recordPending.store(false); storageSetCommitNotification(schedulerNotifyRecord);
 }
 void schedulerNotifyRecord() { recordPending.store(true); }
@@ -183,6 +214,7 @@ bool schedulerPoll(const AppSettings& settings, const ControlReply* control,
   if(tx.applicationSent) {
     retryFor = SCHEDULER_MIN_MS; retryPending = false; blockedFor = 0;
     if(kind == ReportKind::Sensor) {
+      if(!firstSensor) { availabilityMask = 0x7F; }
       firstSensor = true; freshInterval = false; availabilityPending = false; reportAnchor = healthAnchor = now;
       LOG_DEBUG("Scheduler", "Sensor report sent; interval=%lu seconds.", (unsigned long)(interval / 1000));
     } else if(kind == ReportKind::Health) {

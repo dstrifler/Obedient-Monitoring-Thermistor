@@ -226,9 +226,30 @@ int main(int argc,char** argv){
   initializing=true;advance(4000);
   assert(sensorLatestSnapshot(&sample) && sample.airQuality.validMask==7 && sample.airQuality.iaqAccuracy==0);
  }
- if(test=="invalid_numeric"){
-  reading.temperature=std::numeric_limits<float>::quiet_NaN();advance(4000);
-  assert(!sensorPresent() && !sensorLatestSnapshot(&sample));
+ if(test=="invalid_numeric" || test=="invalid_humidity" || test=="invalid_pressure"){
+  const auto before=storageGeneration();const auto stepsBefore=steps,startsBefore=initializations;
+  const uint8_t missing=test=="invalid_numeric"?1:test=="invalid_humidity"?2:4;
+  if(missing==1)reading.temperature=std::numeric_limits<float>::quiet_NaN();
+  if(missing==2)reading.humidity=101;
+  if(missing==4)reading.pressure=std::numeric_limits<float>::infinity();
+  advance(12000);
+  assert(sensorPresent() && sensorLatestSnapshot(&sample));
+  assert(sensorValidMask(sample)==uint8_t(15 & ~missing));
+  assert(!sample.temperatureHumidityCompensated && sample.airQuality.validMask==0);
+  assert(steps==stepsBefore && initializations==startsBefore && storageGeneration()>=before+4);
+  SensorSnapshot stored{};assert(storageLatestSnapshot(&stored) && sensorValidMask(stored)==sensorValidMask(sample));
+  goodReading();advance(4000);
+  assert(sensorLatestSnapshot(&sample) && sensorValidMask(sample)==0x7F);
+  assert(initializations==startsBefore && steps>stepsBefore);
+ }
+ if(test=="all_invalid"){
+  const auto before=storageGeneration();const auto stepsBefore=steps;
+  reading.temperature=reading.humidity=reading.pressure=std::numeric_limits<float>::quiet_NaN();
+  reading.status&=~BME68X_GASM_VALID_MSK;advance(12000);
+  assert(sensorPresent() && sensorLatestSnapshot(&sample) && sensorValidMask(sample)==0);
+  assert(storageGeneration()==before && !storageLatestSnapshot(&sample) && steps==stepsBefore);
+  goodReading();advance(4000);assert(sensorLatestSnapshot(&sample) && sensorValidMask(sample)==0x7F);
+  assert(initializations==1);
  }
  assert(!inWorker && heldLocks==0);
 }
@@ -248,11 +269,12 @@ with tempfile.TemporaryDirectory(prefix='bsec-service-') as tmp:
         shutil.copyfile(ROOT/name,folder/name)
     exe=folder/'bsec'
     cases=['healthy','gas_invalid','retry','rollover','restore','reject_restore','state',
-           'missing_fields','errors','warning','save_retry','save_interval','partial_output','initializing','invalid_numeric','direct_ring_and_stop']
+           'missing_fields','errors','warning','save_retry','save_interval','partial_output','initializing',
+           'invalid_numeric','invalid_humidity','invalid_pressure','all_invalid','direct_ring_and_stop']
     for level in [0,3,5]:
         subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-DFW_LOG_LEVEL='+str(level),
                         '-I',str(folder),'-I',str(BSEC/'src'),'-I',str(BME/'src'),str(folder/'fixture.cpp'),
                         str(folder/'sensor_service.cpp'),str(folder/'storage_service.cpp'),str(folder/'sensor_types.cpp'),str(folder/'app_settings.cpp'),str(folder/'bsec_state.cpp'),'-o',str(exe)],check=True)
         for case in cases:
             subprocess.run([str(exe),case],check=True)
-        print('PASS: 16 BSEC acquisition/publication/calibration/status cases at log level',level,flush=True)
+        print('PASS:',len(cases),'BSEC acquisition/publication/calibration/status cases at log level',level,flush=True)

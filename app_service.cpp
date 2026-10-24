@@ -80,7 +80,10 @@ AppSettings proposedSettings(const DecodedCommand& command) {
   return proposed;
 }
 void acceptSettings(const AppSettings& proposed, ControlReply& reply) {
-  if(!settingsValid(proposed) || proposed.serialLevel > FW_LOG_LEVEL) { reply.result = CommandResult::Invalid; return; }
+  if(!settingsValid(proposed)) { reply.result = CommandResult::Invalid; return; }
+  // Persist the requested verbosity even in a build with fewer log levels.
+  // logSetLevel caps actual output; that cap must not reject unrelated settings
+  // or make factory application defaults invalid in an ERROR/OFF build.
   // Validate/save/verify first. No active setting changes until the entire
   // operation succeeds; storage preserves calibration and nonce records.
   if(!storageSaveSettings(proposed)) { reply.result = CommandResult::SaveFailed; return; }

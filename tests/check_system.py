@@ -3,7 +3,7 @@
 from pathlib import Path
 import subprocess
 import tempfile
-from host_support import prepare, compile_host
+from host_support import ROOT, prepare, compile_host
 
 FIXTURE = r'''
 #include "Arduino.h"
@@ -11,7 +11,8 @@ FIXTURE = r'''
 #include "storage_service.h"
 #include "scheduler_service.h"
 #include "encoder_service.h"
-#include "bsec_service.h"
+#include "sensor_service.h"
+#include "FlashIAPBlockDevice.h"
 #include "settings_defaults.h"
 #include <cmath>
 #include <vector>
@@ -21,8 +22,7 @@ FIXTURE = r'''
 #include <string>
 uint32_t ticks=0;thread_local bool inWorker=false;SerialFake Serial;EEPROMFake EEPROM;
 bool clockOkay=true,clockChecked=false,radioReady=false,joinOkay=true,sensorOkay=true,sensorStarted=false;
-bool stopped=false,stopNever=false,nonceEraseFails=false;unsigned erases=0,reboots=0,stops=0;
-unsigned nonceSaves=0;uint8_t nonceBytes[18]={};bool noncePresent=false;
+bool stopped=false,stopNever=false;unsigned reboots=0,stops=0;
 uint32_t acquired=0;uint64_t fullTime=0;SensorSnapshot source{};
 int txResult=0;size_t radioCapacity=53;uint32_t eligibility=0;
 struct Packet {uint32_t time;std::vector<uint8_t> bytes;};std::vector<Packet> packets;
@@ -42,15 +42,11 @@ void delay(uint32_t duration){
 }
 void NVIC_SystemReset(){++reboots;}
 bool clockBegin(){clockChecked=true;return clockOkay;}
-void bsecStart(){sensorStarted=true;acquired=ticks-3000;acquire();}
-void bsecPoll(){acquire();}
-bool bsecStop(){++stops;if(stopNever)return false;stopped=stops>=2;return stopped;}
-bool bsecPresent(){return sensorOkay;}
-bool bsecLatest(SensorSnapshot* out){return out&&storageLatestSnapshot(out);}
-bool nonceStoreBegin(){return true;}
-bool nonceStoreSave(const uint8_t* bytes){memcpy(nonceBytes,bytes,18);noncePresent=true;++nonceSaves;return true;}
-bool nonceStoreLoad(uint8_t* bytes,size_t n){if(!noncePresent||n<18)return false;memcpy(bytes,nonceBytes,18);return true;}
-bool nonceStoreErase(){assert(stopped);++erases;if(nonceEraseFails)return false;memset(nonceBytes,255,18);noncePresent=false;return true;}
+void sensorStart(){sensorStarted=true;acquired=ticks-3000;acquire();}
+void sensorPoll(const AppSettings&){acquire();}
+bool sensorStop(){++stops;if(stopNever)return false;stopped=stops>=2;return stopped;}
+bool sensorPresent(){return sensorOkay;}
+bool sensorLatestSnapshot(SensorSnapshot* out){return out&&storageLatestSnapshot(out);}
 RadioState fakeRadioState=RadioState::Stopped;
 void lwServiceStart(){assert(clockChecked&&clockOkay&&EEPROM.inits==1);fakeRadioState=RadioState::Initializing;}
 void lwServicePoll(){if(fakeRadioState!=RadioState::Stopped)fakeRadioState=joinOkay?RadioState::Ready:RadioState::Joining;radioReady=fakeRadioState==RadioState::Ready;}
@@ -65,7 +61,12 @@ RadioTransaction lwTransmit(const uint8_t* bytes,size_t n){
  packets.push_back({ticks,result.macOnly?std::vector<uint8_t>():std::vector<uint8_t>(bytes,bytes+n)});
  delay(2100);return result;
 }
-#include "app_service.cpp"
+#include "core_service.h"
+#include "lorawan_service.h"
+#include "log_service.h"
+#include "config.h"
+#include <mbed.h>
+#include "core_management.inc"
 void normal(){source={};source.environment={20,50,99000,100000,true};source.airQuality={50,500,0.5f,7,0,false,false};}
 void advance(uint32_t duration){const uint32_t start=ticks;while(uint32_t(ticks-start)<duration)appLoop();}
 size_t sensors(){size_t n=0;for(const auto& p:packets)if(p.bytes.size()==25)++n;return n;}
@@ -75,7 +76,7 @@ void warmed(){appSetup();advance(363000);assert(sensors()==1&&schedulerFirstSens
 void pendingReset(){command({193,5,0,50});assert(resetPending&&resetCode==654321);}
 void confirmReset(){command({193,6,0,51,0,9,251,241});}
 int main(int argc,char** argv){
- assert(argc==2);std::string test=argv[1];normal();
+ assert(argc==2);std::string test=argv[1];normal();flashState().acquisitionStopped=&stopped;
  if(test=="startup"){
   appSetup();advance(359000);assert(sensors()==0&&storageCount()>=119);
   advance(5000);assert(sensors()==1&&schedulerFirstSensorSent()&&schedulerLearningComplete());
@@ -165,22 +166,22 @@ int main(int argc,char** argv){
   pendingReset();const uint32_t began=resetStarted;advance(120000);
   assert(resetPending&&controls()==1&&sensors()==1); // Challenge only, no reset polling.
   command({193,5,0,50});assert(resetStarted==began); // Duplicate does not renew deadline.
-  command({193,6,0,51,0,1,134,160});assert(resetPending&&erases==0); // Wrong code.
-  advance(3600000);assert(!resetPending&&reboots==0&&erases==0);
-  confirmReset();assert(erases==0&&reboots==0);
+  command({193,6,0,51,0,1,134,160});assert(resetPending&&flashState().erases==0); // Wrong code.
+  advance(3600000);assert(!resetPending&&reboots==0&&flashState().erases==0);
+  confirmReset();assert(flashState().erases==0&&reboots==0);
  }else if(test=="confirmed_reset"){
   warmed();uint8_t cal[238]={1};assert(storageSaveCalibration(cal,238,0x26103304));
-  uint8_t nonces[18]={1};assert(storageNonceSave(nonces));pendingReset();confirmReset();advance(500);
-  assert(reboots==1&&erases==1&&stopped&&storageCount()==0);
+  uint8_t nonces[18]={1};assert(storageNonceBegin() && storageNonceSave(nonces));pendingReset();confirmReset();advance(500);
+  assert(reboots==1&&flashState().erases==2&&stopped&&storageCount()==0);
   for(uint8_t value:EEPROM.bytes)assert(value==255);
-  assert(!noncePresent&&!resetPending);
+  uint8_t noncesAfter[18]={};assert(!storageNonceLoad(noncesAfter,18)&&!resetPending);
  }else if(test=="erase_failure"){
-  warmed();pendingReset();nonceEraseFails=true;confirmReset();advance(5000);
-  assert(erases==3&&reboots==0&&lwServiceState()==RadioState::Stopped);
+  warmed();pendingReset();flashState().eraseFails=true;confirmReset();advance(5000);
+  assert(flashState().erases==3&&reboots==0&&lwServiceState()==RadioState::Stopped);
   assert(Serial.output.find("erase verification failed")!=std::string::npos);
  }else if(test=="stop_failure"){
   warmed();pendingReset();stopNever=true;confirmReset();advance(11000);
-  assert(erases==0&&reboots==0&&lwServiceState()==RadioState::Stopped);
+  assert(flashState().erases==0&&reboots==0&&lwServiceState()==RadioState::Stopped);
  }else if(test=="settings_and_calibration"){
   assert(storageBegin());AppSettings s=settingsDefaults();s.intervalMinutes=59;
   uint8_t cal[238]={7},out[238]={};assert(storageSaveCalibration(cal,238,0x26103304));
@@ -240,9 +241,11 @@ CASES = ['startup', 'startup_missing', 'fixed_missing', 'fixed_cadence', 'fixed_
          'confirmed_reset', 'erase_failure', 'stop_failure', 'settings_and_calibration',
          'legacy_settings', 'log_ceiling', 'concurrency', 'timer_wrap', 'clock_fault_and_uart', 'uart_backpressure']
 with tempfile.TemporaryDirectory(prefix='monitor-system-') as temp:
-    folder=Path(temp);prepare(folder);(folder/'fixture.cpp').write_text(FIXTURE)
-    exe=compile_host(folder,['fixture.cpp','storage_service.cpp','eeprom_service.cpp','bsec_state.cpp',
-                             'app_settings.cpp','sensor_types.cpp','sensor_service.cpp','scheduler_service.cpp',
+    folder=Path(temp);prepare(folder)
+    (folder/'core_management.inc').write_text((ROOT/'core_service.cpp').read_text().split('// Core management.\n',1)[1])
+    (folder/'fixture.cpp').write_text(FIXTURE)
+    exe=compile_host(folder,['fixture.cpp','storage_service.cpp',
+                             'common.cpp','scheduler_service.cpp',
                              'encoder_service.cpp','log_service.cpp'],'system')
     for case in CASES:
         subprocess.run([str(exe),case],check=True)
@@ -250,8 +253,8 @@ with tempfile.TemporaryDirectory(prefix='monitor-system-') as temp:
     # The supported compile-time ceiling caps output without changing the
     # validity or persistence of application preferences and OTA batches.
     for level in range(5):
-        exe=compile_host(folder,['fixture.cpp','storage_service.cpp','eeprom_service.cpp','bsec_state.cpp',
-                                 'app_settings.cpp','sensor_types.cpp','sensor_service.cpp','scheduler_service.cpp',
+        exe=compile_host(folder,['fixture.cpp','storage_service.cpp',
+                                 'common.cpp','scheduler_service.cpp',
                                  'encoder_service.cpp','log_service.cpp'],'system-level-'+str(level),
                          flags=['-DFW_LOG_LEVEL='+str(level)])
         subprocess.run([str(exe),'log_ceiling'],check=True)

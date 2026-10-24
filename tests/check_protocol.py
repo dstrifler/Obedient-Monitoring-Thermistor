@@ -69,7 +69,7 @@ console.log('PASS: 40 presentation combinations, firmware configuration/status/c
 '''
 with tempfile.TemporaryDirectory(prefix='monitor-protocol-') as temp:
     folder=Path(temp);prepare(folder);(folder/'fixture.cpp').write_text(CPP);(folder/'check.js').write_text(JS)
-    exe=compile_host(folder,['fixture.cpp','encoder_service.cpp','app_settings.cpp','sensor_types.cpp'],'protocol', ['-Wno-misleading-indentation'])
+    exe=compile_host(folder,['fixture.cpp','encoder_service.cpp','common.cpp'],'protocol', ['-Wno-misleading-indentation'])
     packets=subprocess.check_output([str(exe)],text=True)
     subprocess.run(['node',str(folder/'check.js'),str(ROOT/'decoders/environment_v1.js')],input=packets,text=True,check=True)
     spec=importlib.util.spec_from_file_location('commands',ROOT/'tools/downlink.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

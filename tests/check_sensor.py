@@ -192,8 +192,7 @@ int main(int argc,char** argv){
 '''
 with tempfile.TemporaryDirectory(prefix='raw-sensor-') as temp:
     folder=Path(temp)
-    for name in ['sensor_service.cpp','sensor_service.h','sensor_types.cpp','sensor_types.h','storage_service.h',
-                 'app_settings.h','app_settings.cpp','settings_defaults.h','log_service.h','log_service.cpp','log_config.h','firmware_features.h']:
+    for name in ['sensor_service.cpp','sensor_service.h','common.cpp','common.h','storage_service.h','settings_defaults.h','log_service.h','log_service.cpp']:
         shutil.copyfile(ROOT/name,folder/name)
     shutil.copytree(LIB/'src',folder/'bosch')
     files={'Arduino.h':ARDUINO,'Wire.h':WIRE,
@@ -206,7 +205,7 @@ with tempfile.TemporaryDirectory(prefix='raw-sensor-') as temp:
         exe=folder/'sensor'
         subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-DSENSOR_BSEC_ENABLED=0','-DARDUINO=10819',
                         '-DFW_LOG_LEVEL='+str(level),'-I',str(folder),'-I',str(folder/'bosch'),
-                        *[str(folder/name) for name in ['sensor_service.cpp','sensor_types.cpp','app_settings.cpp','log_service.cpp','bosch/bme68xLibrary.cpp','fixture.cpp']],
+                        *[str(folder/name) for name in ['sensor_service.cpp','common.cpp','log_service.cpp','bosch/bme68xLibrary.cpp','fixture.cpp']],
                         '-o',str(exe)],check=True)
         for case in cases:subprocess.run([str(exe),case],check=True)
         print('PASS:',len(cases),'raw-sensor timing/validation/publication cases at log level',level,flush=True)

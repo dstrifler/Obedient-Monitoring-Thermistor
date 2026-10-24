@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "sensor_types.h"
+#include "common.h"
 #include "settings_defaults.h"
 
 // Atomic snapshot of one acquisition, including derived outputs when available.

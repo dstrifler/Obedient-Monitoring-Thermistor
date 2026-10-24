@@ -1,6 +1,6 @@
 # Environmental and control protocol
 
-The six-service firmware sends **25-byte version-3 sensor reports on FPort 1**.
+The seven-service firmware sends **25-byte version-3 sensor reports on FPort 1**.
 Install the complete [decoder](decoders/environment_v1.js) before flashing this
 firmware. Its historical filename is retained; it accepts v1, v2, v3, and the
 new control/health packets. Existing MQTT canonical field names remain available.

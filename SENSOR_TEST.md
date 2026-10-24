@@ -1,4 +1,4 @@
-# Waveshare BME688 / six-service firmware bench test
+# Waveshare BME688 / seven-service firmware bench test
 
 The firmware follows [SOFTWARE_DESIGN.md](SOFTWARE_DESIGN.md). BSEC acquires about
 every three seconds and commits directly to a one-hour RAM ring. Default RF
@@ -77,6 +77,12 @@ BSEC_UPSTREAM=/path/to/Bosch-BSEC2-Library bash tools/check-board.sh
 
 ## First physical test
 
+For the service consolidation, close Arduino IDE before pulling the complete
+update, then reopen `Obedient_Monitoring_Thermistor.ino`. Old sub-service files
+were removed and must not remain as open/restored sketch tabs. The existing
+linker setup still applies if repository/library paths are unchanged. The
+consolidation does not change v3 packet bytes or require another decoder update.
+
 1. Save the entire updated [decoder](decoders/environment_v1.js) in Helium before
    expecting new packet fields. The new sensor packet is 25-byte v3; control and
    health messages have an `A1` header. Historical v1/v2 still decode.
@@ -130,4 +136,4 @@ the board tests above.
 `THERMISTOR_SENSOR_ENABLED=0` selects radio/health only. The first-complete-report
 gate is unchanged: these diagnostics cannot produce all seven BSEC measurements,
 so they send health packets and, for raw mode, Serial readings. Compile-time
-feature switches remain in `firmware_features.h`.
+feature switches remain in `common.h`.

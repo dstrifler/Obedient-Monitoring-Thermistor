@@ -1,4 +1,8 @@
-"""Hardware substitutes for host tests; production sources are copied unchanged."""
+"""Hardware substitutes for consolidated-service host tests.
+
+Production sources are copied unchanged. Specific hardware unit harnesses may
+select documented private sections while the board build compiles whole services.
+"""
 from pathlib import Path
 import os
 import re
@@ -46,6 +50,41 @@ struct EEPROMFake {
  }
 };extern EEPROMFake EEPROM;
 '''
+FLASH = r'''
+#pragma once
+#include "Arduino.h"
+#include <cstring>
+struct FlashFakeState {
+ uint8_t bytes[16384];bool eraseFails=false,readFails=false,programFails=false;
+ unsigned erases=0;const bool* acquisitionStopped=nullptr;
+ FlashFakeState(){memset(bytes,255,sizeof(bytes));}
+};
+inline FlashFakeState& flashState(){static FlashFakeState state;return state;}
+class FlashIAPBlockDevice {
+ public:
+ FlashIAPBlockDevice(uint32_t base,uint32_t size){assert(base==0xFA000 && size==16384);}
+ int init(){assert(!inWorker);return 0;}
+ uint32_t get_program_size(){return 4;}uint32_t get_erase_size(){return 8192;}
+ int read(void* data,uint32_t offset,size_t size){
+  assert(!inWorker && offset+size<=16384);auto& f=flashState();
+  if(f.readFails){return -1;}memcpy(data,f.bytes+offset,size);return 0;
+ }
+ int program(const void* data,uint32_t offset,size_t size){
+  assert(!inWorker && offset+size<=16384);auto& f=flashState();if(f.programFails)return -1;
+  auto* bytes=static_cast<const uint8_t*>(data);
+  for(size_t i=0;i<size;++i){f.bytes[offset+i]&=bytes[i];}return 0;
+ }
+ int erase(uint32_t offset,size_t size){
+  assert(!inWorker && offset+size<=16384);auto& f=flashState();
+  if(f.acquisitionStopped){assert(*f.acquisitionStopped);}++f.erases;
+  if(f.eraseFails){return -1;}memset(f.bytes+offset,255,size);return 0;
+ }
+};
+'''
+STORAGE_LINK_FLAGS = ['-no-pie', '-Wl,--defsym=__etext=0x10000',
+                      '-Wl,--defsym=__data_start__=0x20000000',
+                      '-Wl,--defsym=__data_end__=0x20000000']
+
 def prepare(folder):
     for pattern in ('*.h', '*.cpp'):
         for source in ROOT.glob(pattern):
@@ -54,6 +93,7 @@ def prepare(folder):
     constants = '\n'.join(line for line in (RADIO / 'src/TypeDef.h').read_text().splitlines()
                           if re.match(r'#define RADIOLIB_ERR_\w+\s+\(-?\d+\)', line))
     files = {'Arduino.h': ARDUINO, 'mbed.h': MBED, 'EEPROM.h': EEPROM,
+             'FlashIAPBlockDevice.h': FLASH,
              'RadioLib.h': '#pragma once\n#define RADIOLIB_LORAWAN_NONCES_BUF_SIZE 18\n' + constants,
              'config.h': '#pragma once\n#define SERIAL_BAUD_RATE 115200\n'}
     for name, text in files.items():
@@ -63,6 +103,6 @@ def compile_host(folder, sources, name, flags=()):
     sanitizer = ['-fsanitize=undefined', '-fno-sanitize-recover=all'] if os.environ.get('HOST_SANITIZERS') == '1' else []
     subprocess.run(['g++', '-std=c++11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                     '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections', '-pthread',
-                    *sanitizer, *flags, '-I', str(folder), *[str(folder / source) for source in sources],
+                    *sanitizer, *(STORAGE_LINK_FLAGS if 'storage_service.cpp' in sources else []), *flags, '-I', str(folder), *[str(folder / source) for source in sources],
                     '-o', str(folder / name)], check=True)
     return folder / name

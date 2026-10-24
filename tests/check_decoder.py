@@ -133,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix='thermistor-decoder-') as tmp:
     subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
                     '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
                     '-I', str(folder), '-I', str(ROOT), str(folder / 'encoder.cpp'),
-                    str(folder / 'encoder_service.cpp'), str(folder / 'app_settings.cpp'), str(folder / 'sensor_types.cpp'), '-o', str(program)], check=True)
+                    str(folder / 'encoder_service.cpp'), str(folder / 'common.cpp'), '-o', str(program)], check=True)
     packets = subprocess.check_output([str(program)], text=True)
     subprocess.run([NODE, str(folder / 'check.js'), str(ROOT / 'decoders/environment_v1.js')],
                    input=packets, text=True, check=True)

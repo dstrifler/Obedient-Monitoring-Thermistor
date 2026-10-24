@@ -1,23 +1,35 @@
-# Six-service firmware implementation
+# Seven-service firmware implementation
 
 [SOFTWARE_DESIGN.md](SOFTWARE_DESIGN.md) is the functional constitution. This
 file maps that design to implementation; [ENVIRONMENT_PACKET.md](ENVIRONMENT_PACKET.md)
 is the versioned wire contract.
 
-| Service | Files |
-| --- | --- |
-| Core/management | `app_service.h/.cpp`, `clock_service.h/.cpp`, Arduino `.ino` wrapper |
-| Scheduler | `scheduler_service.h/.cpp` |
-| Encoder/decoder | `encoder_service.h/.cpp`, `protocol_types.h`, console JavaScript decoder |
-| LoRa | `lorawan_service.h/.cpp`, `radio_hal.h/.cpp`, `lorawan_timer.h/.cpp` |
-| Storage | `storage_service.h/.cpp`, private `eeprom_service`, `nonce_store`, `bsec_state` backends |
-| Sensor | `sensor_service.h/.cpp`, `bsec_service.h/.cpp`, shared `sensor_types.h/.cpp` |
+Each service has exactly one public header and one implementation. Supporting
+code is private inside that implementation; there are no sub-service files.
 
-`config.h` remains unchanged, including provisioning and board/radio constants.
-`settings_defaults.h` defines factory preferences; `app_settings.h/.cpp` defines
-and validates active application preferences. The former settings/payload
-modules, their unused JSON/debug modes, and the unpublished minute-snapshot
-reporting draft are replaced by these interfaces.
+| Service | Files | Includes privately |
+| --- | --- | --- |
+| Core/management | `core_service.h/.cpp` | Crystal-disciplined clock verification and management state machine |
+| Sensor | `sensor_service.h/.cpp` | BSEC worker, raw backend, validation, calibration decisions |
+| Storage | `storage_service.h/.cpp` | EEPROM bootstrap/layout, calibration record, nonce journal, RAM ring |
+| Scheduler | `scheduler_service.h/.cpp` | Reporting policy, learning gates, retry pacing |
+| Encoder/decoder | `encoder_service.h/.cpp` | Sensor/control packets and application-command parsing |
+| LoRa | `lorawan_service.h/.cpp` | Apollo3 radio HAL, rollover timing, XTAL initialization, joins and recovery |
+| Logging | `log_service.h/.cpp` | Cooperative Serial state machine, formatting, queue, overflow and backpressure |
+
+`common.h/.cpp` contains shared settings, sensor/protocol/radio data types,
+compile-time sensor features, and pure validation helpers. It has no service
+state or hardware/I/O ownership. Header contracts remain acyclic.
+`settings_defaults.h` defines factory application preferences; the Arduino `.ino`
+is the entry point. `config.h` remains unchanged, including provisioning and
+board/radio constants. Those are the only production support files outside the
+seven service pairs and common pair; tests, tools and reference sketches remain
+separate. Removed filenames are not retained as compatibility headers.
+
+Private implementation sections retain ordinary C++ helpers/classes inside
+anonymous namespaces. The host harnesses exercise those sections directly when
+hardware needs substituting, without publishing private backend APIs or adding
+production test hooks.
 
 ## Timing and radio preservation
 
@@ -40,6 +52,21 @@ management only after the Class A transaction completes. Control replies do not
 reset the ordinary sensor-report deadline or count as the first sensor report.
 Regular health packets occupy fixed-mode reporting slots, preserving the chosen
 interval through sensor loss and recovery.
+
+## Cooperative logging
+
+Core initializes logging and calls `logPump()` from its main loop and safe
+startup waits. No logging thread is created. The service owns the Serial sink,
+message formatting, twelve fixed queue slots, severity-aware eviction and
+cumulative drop accounting. Each pump emits at most 64 bytes or one millisecond
+of work; a nonwritable Serial port never makes acquisition wait.
+
+`logState()` exposes `Stopped`, `Disabled`, `Idle`, `Queued`, or
+`Backpressured`. Queueing, bounded pumping, runtime OFF/re-enable, and Serial
+readiness drive transitions. A compile-time OFF build reports `Disabled` without
+initializing Serial. Runtime OFF discards pending output. Worker threads and ISRs
+do not call the logger; sensor diagnostics/persistence are polled on main.
+Radio code emits only outside its precise receive-window work.
 
 ## RAM history and concurrency
 

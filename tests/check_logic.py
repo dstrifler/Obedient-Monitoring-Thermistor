@@ -67,11 +67,13 @@ void sensorStart() {}
 void sensorPoll() {}
 '''
 
-for name in ['log_config.h', 'log_service.h', 'log_service.cpp']:
+for name in ['log_service.h', 'log_service.cpp']:
     COMMON += re.sub(r'^#include .*\n', '', (ROOT / name).read_text(), flags=re.M)
 
-COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.h').read_text(), flags=re.M)
-COMMON += re.sub(r'^#include .*\n', '', (ROOT / 'lorawan_timer.cpp').read_text(), flags=re.M)
+transport = (ROOT / 'lorawan_service.cpp').read_text()
+timer = transport.split('// Private LoRa rollover timing.\n', 1)[1].split('// LoRa transport and lifecycle.\n', 1)[0]
+COMMON += 'static constexpr int16_t LW_ERR_TIMER_ROLLOVER = -31998;\n'
+COMMON += re.sub(r'^#include .*\n', '', timer, flags=re.M)
 
 JOURNAL_FAKE = r'''
 #define RADIOLIB_LORAWAN_NONCES_BUF_SIZE 18
@@ -111,7 +113,7 @@ public:
 };
 '''
 
-journal = (ROOT / 'nonce_store.cpp').read_text().replace('#include "nonce_store.h"\n', '')
+journal = (ROOT / 'storage_service.cpp').read_text().split('// Private nonce journal.\n',1)[1].split('// Private calibration record.\n',1)[0]
 
 run('journal', COMMON + JOURNAL_FAKE + journal + r'''
 int main() {
@@ -166,7 +168,7 @@ error_defines = '\n'.join(line for line in (upstream / 'src/TypeDef.h').read_tex
 
 assert len(error_defines.splitlines()) == len(error_names)
 
-clock = (ROOT / 'clock_service.cpp').read_text()
+clock = (ROOT / 'core_service.cpp').read_text()
 
 clock = clock[clock.index('static bool clockReadRtcHundredths'):clock.index('bool clockBegin()')]
 
@@ -191,6 +193,7 @@ int main() {
 ''')
 
 lw = (ROOT / 'lorawan_service.cpp').read_text()
+lw = lw[lw.index('#if !defined(LORA_USE_OTAA)'):]
 
 node_class = lw[lw.index('class PersistentLoRaWANNode'):lw.index('static PersistentLoRaWANNode')]
 

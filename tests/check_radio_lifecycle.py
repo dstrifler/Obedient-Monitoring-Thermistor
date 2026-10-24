@@ -4,11 +4,12 @@ from pathlib import Path
 import subprocess
 import tempfile
 from host_support import ROOT, prepare, compile_host
-source=(ROOT/'lorawan_service.cpp').read_text().split('// Radio lifecycle is kept separate',1)[1]
+transport=(ROOT/'lorawan_service.cpp').read_text()
+timer=transport.split('// Private LoRa rollover timing.\n',1)[1].split('// LoRa transport and lifecycle.\n',1)[0]
+source=transport.split('// Radio lifecycle is kept separate',1)[1]
 CPP=r'''
 #include "Arduino.h"
 #include "lorawan_service.h"
-#include "lorawan_timer.h"
 #include "log_service.h"
 #include <cstring>
 #include <string>
@@ -75,8 +76,8 @@ int main(int argc,char** argv){
 }
 '''
 with tempfile.TemporaryDirectory(prefix='radio-lifecycle-') as temp:
-    folder=Path(temp);prepare(folder);(folder/'fixture.cpp').write_text(CPP+'// Radio lifecycle is kept separate'+source+MAIN)
-    exe=compile_host(folder,['fixture.cpp','lorawan_timer.cpp','log_service.cpp'],'radio')
+    folder=Path(temp);prepare(folder);(folder/'fixture.cpp').write_text(CPP+timer+'// Radio lifecycle is kept separate'+source+MAIN)
+    exe=compile_host(folder,['fixture.cpp','log_service.cpp'],'radio')
     for case in ['join_without_settling','initialization_failure','persistence_failure','network_retry',
                  'hardware_recovery','mixed_errors','bounded_recovery','capacity_and_mac','rollover','eligibility_and_stop','entropy']:
         subprocess.run([str(exe),case],check=True)

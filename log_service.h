@@ -11,6 +11,8 @@ enum class LogLevel : uint8_t { OFF, ERROR, WARN, INFO, DEBUG, TRACE };
 // Main-thread service: no logging/pumping from interrupts or other threads.
 // This service exclusively owns Serial. Messages live only in bounded RAM.
 void logBegin(unsigned long baud);
+void logSetLevel(LogLevel level);
+LogLevel logGetLevel();
 void logPump();
 void logServiceDelay(uint32_t waitMs);
 uint32_t logDroppedCount(LogLevel level);

@@ -57,7 +57,7 @@ def run(name, level, body, extras=None):
     with tempfile.TemporaryDirectory(prefix='thermistor-serial-') as tmp:
         folder = Path(tmp)
         (folder / 'Arduino.h').write_text(ARDUINO)
-        (folder / 'main.cpp').write_text(COMMON + body)
+        (folder / 'main.cpp').write_text(COMMON + body.replace('logBegin(115200);', 'logBegin(115200);logSetLevel(LogLevel(FW_LOG_LEVEL));'))
         paths = []
         for filename, contents in (extras or {}).items():
             path = folder / filename
@@ -226,3 +226,12 @@ for source in [*ROOT.glob('*.h'), *ROOT.glob('*.ino'), *ROOT.glob('*.cpp')]:
 for name in ['log_service.h', 'log_service.cpp']:
     assert not re.search(r'\b(fopen|ofstream|EEPROM|FlashIAP)\b', (ROOT / name).read_text()), name
 print('PASS: serial ownership and removed raw timestamp captures', flush=True)
+
+run('runtime_level_and_off_queue', 5, r'''
+int main(){
+ logBegin(115200);logSetLevel(LogLevel::INFO);LOG_TRACE("T","hidden");LOG_INFO("T","pending");
+ logSetLevel(LogLevel::OFF);drain();assert(Serial.output.empty());
+ logSetLevel(LogLevel::TRACE);LOG_TRACE("T","visible");drain();
+ assert(Serial.output=="[TRACE][T] visible\r\n");
+}
+''')

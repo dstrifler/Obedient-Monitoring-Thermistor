@@ -3,7 +3,12 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOLS_DIR="${THERMISTOR_TOOLS_DIR:-/workspace/.thermistor-tools}"
 BUILD_ROOT="${THERMISTOR_BUILD_DIR:-/workspace/work}"
-STAGE_DIR="$BUILD_ROOT/Obedient_Monitoring_Thermistor"
+# A fresh owned staging directory prevents deleted sketch modules from being
+# copied forward into a later build. Never clean the user's repository.
+mkdir -p "$BUILD_ROOT"
+STAGE_ROOT="$(mktemp -d "$BUILD_ROOT/thermistor-stage.XXXXXX")"
+STAGE_DIR="$STAGE_ROOT/Obedient_Monitoring_Thermistor"
+trap 'rm -rf -- "$STAGE_ROOT"' EXIT
 CORE_DIR="$TOOLS_DIR/user/hardware/SparkFun/apollo3"
 FW_BUILD_FLAGS=()
 LIBRARY_FLAGS=(--library "$TOOLS_DIR/user/libraries/RadioLib")
@@ -57,7 +62,7 @@ linker += '\nASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xFA000, "Firmware overla
 pathlib.Path(sys.argv[2]).write_text(linker)
 PY
 python3 "$REPO_DIR/tools/verify_radiolib.py" "$TOOLS_DIR/user/libraries/RadioLib"
-exec "$TOOLS_DIR/bin/arduino-cli" compile \
+"$TOOLS_DIR/bin/arduino-cli" compile \
   --config-file "$TOOLS_DIR/arduino-cli.yaml" \
   "${LIBRARY_FLAGS[@]}" \
   --fqbn SparkFun:apollo3:lora_thing_plus \

@@ -34,4 +34,23 @@ size_t lwMaxPayloadBytes();
 uint32_t lwTimeUntilUplink();
 bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates);
 
+// Main-thread radio lifecycle; application delivery policy lives in scheduler.
+enum class RadioState : uint8_t { Stopped, Initializing, Joining, Ready, Cooldown, Rollover, Fault };
+struct RadioTransaction {
+  int16_t result;
+  bool applicationSent;
+  bool macOnly;
+  size_t downlinkSize;
+  uint8_t downlink[255];
+};
+void lwServiceStart();
+void lwServicePoll();
+void lwServiceStop();
+RadioState lwServiceState();
+int16_t lwServiceError();
+bool lwServiceReady();
+uint32_t lwServiceWait();
+RadioTransaction lwTransmit(const uint8_t* payload, size_t size);
+uint32_t lwGenerateResetCode();
+
 #endif

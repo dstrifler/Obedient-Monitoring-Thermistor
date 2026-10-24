@@ -41,8 +41,6 @@
   #error "EEPROM layout overflow: settings region exceeds EEPROM_TOTAL_BYTES"
 #endif
 
-#define SETTINGS_MAGIC                0x47534150UL   // "GSAP"
-#define SETTINGS_VERSION              2
 
 bool eepromBootstrap();
 

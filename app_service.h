@@ -1,8 +1,12 @@
 #ifndef APP_SERVICE_H
 #define APP_SERVICE_H
 
-// Application state machine; called only from Arduino setup()/loop().
+#include "app_settings.h"
+
+// Main-thread lifecycle and command management. Sensor acquisition runs in its
+// own worker; scheduler alone initiates the encoder -> LoRa delivery chain.
 void appSetup();
 void appLoop();
+const AppSettings& appSettings();
 
 #endif

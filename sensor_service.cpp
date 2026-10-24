@@ -1,10 +1,17 @@
 #include "sensor_service.h"
 #include "firmware_features.h"
+#include "storage_service.h"
+#include <Arduino.h>
+#include <math.h>
+#include <stdio.h>
+#include "log_service.h"
 
+// Backends own acquisition and publish complete records directly to storage.
+// The facade services persistence and formatted Serial on the main thread.
 #if SENSOR_SERVICE_ENABLED && SENSOR_BSEC_ENABLED
 #include "bsec_service.h"
-void sensorStart() { bsecStart(); }
-void sensorPoll() { bsecPoll(); }
+static void sensorBackendStart() { bsecStart(); }
+static void sensorBackendPoll() { bsecPoll(); }
 bool sensorLatestSnapshot(SensorSnapshot* data) { return bsecLatest(data); }
 bool sensorLatest(SensorData* data) {
   SensorSnapshot snapshot = {};
@@ -36,9 +43,9 @@ static uint32_t gMeasurementStartedMs = 0;
 static uint32_t gMeasurementWaitMs = 0;
 static constexpr uint16_t HEATER_TEMPERATURE_C = 300;
 static constexpr uint16_t HEATER_DURATION_MS = 100;
-static constexpr uint32_t SAMPLE_INTERVAL_MS = 60000;
+static constexpr uint32_t SAMPLE_INTERVAL_MS = 3000;
 static constexpr uint32_t DATA_READY_GRACE_MS = 1000;
-static constexpr uint32_t SAMPLE_MAX_AGE_MS = 65000;
+static constexpr uint32_t SAMPLE_MAX_AGE_MS = 10000;
 static SensorData gLatestSample = {};
 static bool gHaveLatestSample = false;
 static uint32_t gLatestSampleMs = 0;
@@ -56,6 +63,7 @@ static uint64_t sensorUptimeMs() {
 enum SensorState : uint8_t { SENSOR_STOPPED, SENSOR_START, SENSOR_WAIT, SENSOR_COOLDOWN };
 static SensorState gSensorState = SENSOR_STOPPED;
 static uint32_t gCycleStartedMs = 0;
+static uint32_t gCycleWaitMs = SAMPLE_INTERVAL_MS;
 
 static bool sensorFailure(const char* operation) {
   LOG_WARN("Sensor", "%s failed: code=%d; retry in 60 seconds.", operation, int(gBme.status));
@@ -177,46 +185,25 @@ bool sensorLatestSnapshot(SensorSnapshot* data) {
   return true;
 }
 
-static void logSample(const SensorData& sample) {
-#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
-  // Integer formatting avoids depending on embedded printf float support.
-  const long temperature = lroundf(sample.temperatureC * 100.0f);
-  const unsigned long magnitude = temperature < 0 ? -temperature : temperature;
-  const unsigned long humidity = lroundf(sample.humidityPct * 100.0f);
-  const unsigned long pressure = lroundf(sample.pressurePa);
-  if(sample.gasValid) {
-    LOG_INFO("Sensor", "T=%s%lu.%02lu C, RH=%lu.%02lu %%, P=%lu.%02lu hPa, gas=%lu ohm",
-             temperature < 0 ? "-" : "", magnitude / 100, magnitude % 100,
-             humidity / 100, humidity % 100, pressure / 100, pressure % 100,
-             (unsigned long)sample.gasOhms);
-  } else {
-    LOG_INFO("Sensor", "T=%s%lu.%02lu C, RH=%lu.%02lu %%, P=%lu.%02lu hPa, gas=unavailable",
-             temperature < 0 ? "-" : "", magnitude / 100, magnitude % 100,
-             humidity / 100, humidity % 100, pressure / 100, pressure % 100);
-  }
-#else
-  (void)sample;
-#endif
-}
-
-void sensorStart() {
+static void sensorBackendStart() {
   if(gSensorState != SENSOR_STOPPED) { return; }
   gSensorState = SENSOR_START;
-  LOG_INFO("Sensor", "Serial sampling enabled: first reading now, then every 60 seconds.");
+  LOG_INFO("Sensor", "Raw acquisition enabled: first reading now, then every three seconds.");
 }
 
-void sensorPoll() {
+static void sensorBackendPoll() {
   if(gSensorState == SENSOR_STOPPED) { return; }
   sensorUptimeMs();
   const uint32_t now = millis();
   if(gSensorState == SENSOR_COOLDOWN) {
-    if(now - gCycleStartedMs < SAMPLE_INTERVAL_MS) { return; }
+    if(now - gCycleStartedMs < gCycleWaitMs) { return; }
     gSensorState = SENSOR_START;
   }
   if(gSensorState == SENSOR_START) {
     gCycleStartedMs = now;
     if((!gSensorPresent && !sensorBegin()) || !sensorTrigger()) {
       gCycleStartedMs = millis();
+      gCycleWaitMs = 60000;
       gSensorState = SENSOR_COOLDOWN;
       return;
     }
@@ -225,9 +212,14 @@ void sensorPoll() {
   }
   SensorData sample = {};
   if(sensorFetch(&sample)) {
-    logSample(sample);
+    SensorSnapshot record = {};
+    record.environment = sample;
+    record.sampleUptimeSeconds = gLatestSampleUptimeSeconds;
+    storageAppend(record, gLatestSampleMs);
+    gCycleWaitMs = SAMPLE_INTERVAL_MS;
     gSensorState = SENSOR_COOLDOWN;
   } else if(!gMeasurementPending) {
+    gCycleWaitMs = 60000;
     gCycleStartedMs = millis();
     gSensorState = SENSOR_COOLDOWN;
   }
@@ -235,8 +227,8 @@ void sensorPoll() {
 
 #else
 // Radio-only build: no sensor dependency, bus initialization, or acquisition.
-void sensorStart() {}
-void sensorPoll() {}
+static void sensorBackendStart() {}
+static void sensorBackendPoll() {}
 bool sensorBegin() { return false; }
 bool sensorTrigger() { return false; }
 bool sensorFetch(SensorData*) { return false; }
@@ -244,3 +236,83 @@ bool sensorLatest(SensorData*) { return false; }
 bool sensorLatestSnapshot(SensorSnapshot*) { return false; }
 bool sensorPresent() { return false; }
 #endif
+
+namespace {
+bool facadeStarted = false;
+uint32_t lastSerialMs = 0;
+#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
+void formatReading(char* out, size_t size, double value, unsigned decimals,
+                   const char* unit, bool available) {
+  if(!available) { snprintf(out, size, "unavailable"); return; }
+  const uint32_t factors[] = {1, 10, 100, 1000};
+  const uint32_t factor = factors[decimals];
+  const double magnitude = fabs(value) * factor;
+  if(!isfinite(magnitude) || magnitude > UINT32_MAX) { snprintf(out, size, "out of display range"); return; }
+  const uint32_t scaled = uint32_t(magnitude + 0.5);
+  if(decimals) {
+    snprintf(out, size, "%s%lu.%0*lu %s", value < 0 ? "-" : "",
+      (unsigned long)(scaled / factor), int(decimals), (unsigned long)(scaled % factor), unit);
+  } else {
+    snprintf(out, size, "%s%lu %s", value < 0 ? "-" : "", (unsigned long)scaled, unit);
+  }
+}
+#endif
+void printReading(const SensorSnapshot& sample, const AppSettings& settings) {
+#if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
+  const auto& e = sample.environment;
+  const auto& a = sample.airQuality;
+  const uint8_t mask = sensorValidMask(sample);
+  const float temperature = settings.temperature == TemperatureUnit::Fahrenheit ? e.temperatureC * 1.8f + 32 : e.temperatureC;
+  float pressure = e.pressurePa;
+  const char* pressureUnit = "Pa";
+  switch(settings.pressure) {
+    case PressureUnit::Hpa: pressure /= 100; pressureUnit = "mbar"; break;
+    case PressureUnit::InHg: pressure /= 3386.389f; pressureUnit = "inHg"; break;
+    case PressureUnit::Kpa: pressure /= 1000; pressureUnit = "kPa"; break;
+    case PressureUnit::MmHg: pressure /= 133.3224f; pressureUnit = "mmHg"; break;
+    case PressureUnit::Pa: break;
+  }
+  char temp[32], humidity[32], pres[32], gas[32], iaq[32], co2[32], voc[40];
+  formatReading(temp, sizeof(temp), temperature, 2,
+    settings.temperature == TemperatureUnit::Fahrenheit ? "F" : "C", mask & 1);
+  formatReading(humidity, sizeof(humidity), e.humidityPct, 2, "%RH", mask & 2);
+  formatReading(pres, sizeof(pres), pressure, 2, pressureUnit, mask & 4);
+  formatReading(gas, sizeof(gas), settings.gas == GasUnit::KiloOhms ? double(e.gasOhms) / 1000 : e.gasOhms,
+    settings.gas == GasUnit::KiloOhms ? 3 : 0, settings.gas == GasUnit::KiloOhms ? "kohm" : "ohm", mask & 8);
+  formatReading(iaq, sizeof(iaq), a.iaq, 1, "", mask & 16);
+  formatReading(co2, sizeof(co2), a.co2EquivalentPpm, 0, "ppm", mask & 32);
+  formatReading(voc, sizeof(voc), double(a.breathVocEquivalentPpm) * (settings.voc == VocUnit::Ppb ? 1000 : 1),
+    settings.voc == VocUnit::Ppb ? 1 : 3, settings.voc == VocUnit::Ppb ? "ppb" : "ppm", mask & 64);
+  LOG_INFO("Sensor", "T=%s, RH=%s, P=%s, valid=0x%02X.", temp, humidity, pres, unsigned(mask));
+  LOG_INFO("Sensor", "Gas=%s, IAQ=%s(accuracy=%u), CO2eq=%s, VOCeq=%s.",
+    gas, iaq, unsigned(a.iaqAccuracy), co2, voc);
+#else
+  (void)sample; (void)settings;
+#endif
+}
+}
+void sensorStart() {
+  if(facadeStarted) { return; }
+  facadeStarted = true;
+  lastSerialMs = millis() - 60000UL;
+  sensorBackendStart();
+}
+void sensorPoll(const AppSettings& settings) {
+  if(!facadeStarted) { return; }
+  sensorBackendPoll();
+  if(uint32_t(millis() - lastSerialMs) >= 60000UL) {
+    SensorSnapshot sample = {};
+    if(sensorLatestSnapshot(&sample)) { lastSerialMs = millis(); printReading(sample, settings); }
+  }
+}
+bool sensorStop() {
+#if SENSOR_SERVICE_ENABLED && SENSOR_BSEC_ENABLED
+  return bsecStop();
+#elif SENSOR_SERVICE_ENABLED
+  gSensorState = SENSOR_STOPPED;
+  gMeasurementPending = false;
+  return true;
+#else
+  return true;
+#endif
+}

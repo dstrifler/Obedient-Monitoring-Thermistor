@@ -8,10 +8,10 @@
 #define FW_LOG_LEVEL_DEBUG 4
 #define FW_LOG_LEVEL_TRACE 5
 
-// Serial output only. Change this default or override FW_LOG_LEVEL at build
-// time. A level includes all more severe messages; OFF disables serial output.
+// Build-time ceiling; runtime verbosity is an OTA setting (factory INFO).
+// Compile TRACE by default so every documented runtime level remains available.
 #ifndef FW_LOG_LEVEL
-#define FW_LOG_LEVEL FW_LOG_LEVEL_INFO
+#define FW_LOG_LEVEL FW_LOG_LEVEL_TRACE
 #endif
 
 #if FW_LOG_LEVEL < FW_LOG_LEVEL_OFF || FW_LOG_LEVEL > FW_LOG_LEVEL_TRACE

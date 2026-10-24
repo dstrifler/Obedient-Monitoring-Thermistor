@@ -2,7 +2,7 @@
 #define FIRMWARE_FEATURES_H
 
 
-// BME688 readings go to Serial and version 2 environmental uplinks.
+// Sensor acquisition feeds Serial and the RAM ring; scheduler selects v3 reports.
 // Set to 0 for a radio-only build without the Bosch sensor dependency.
 #ifndef SENSOR_SERVICE_ENABLED
 #define SENSOR_SERVICE_ENABLED 1

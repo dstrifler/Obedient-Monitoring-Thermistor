@@ -9,7 +9,7 @@
 #if !defined(LORA_USE_OTAA) || (LORA_USE_OTAA != 1)
 #error "OTAA required: ABP needs durable session and frame-counter storage."
 #endif
-#include "nonce_store.h"
+#include "storage_service.h"
 #include "lorawan_timer.h"
 #include "log_service.h"
 #include "radio_hal.h"
@@ -156,7 +156,7 @@ bool lwIsActivated() {
 static bool lwSaveNonces() {
   // Persist the reserved upper bound, never the lower in-RAM next nonce.
   gNode.reservedNonces(gLWnonces, gReservedNonceLimit);
-  gPersistenceHealthy = nonceStoreSave(gLWnonces);
+  gPersistenceHealthy = storageNonceSave(gLWnonces);
   if(!gPersistenceHealthy) {
     LOG_ERROR("Persistence", "Write/verify failed. Joining disabled.");
   }
@@ -164,9 +164,9 @@ static bool lwSaveNonces() {
 }
 
 int16_t lwRestore() {
-  gPersistenceHealthy = nonceStoreBegin();
+  gPersistenceHealthy = storageNonceBegin();
   if(!gPersistenceHealthy) { return LW_ERR_PERSISTENCE; }
-  const bool haveNonces = nonceStoreLoad(gLWnonces, sizeof(gLWnonces));
+  const bool haveNonces = storageNonceLoad(gLWnonces, sizeof(gLWnonces));
   if(haveNonces) {
     int16_t state = gNode.setBufferNonces(gLWnonces);
     if(state != RADIOLIB_ERR_NONE) {
@@ -322,6 +322,12 @@ int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, si
   }
 
   if(state <= 0) { *lenDown = 0; }
+  else if(*lenDown && eventDown.fPort != LORA_UPLINK_FPORT) {
+    // RadioLib already processed MAC traffic. Only our application port may
+    // supply configuration/reset commands to management.
+    LOG_WARN("LoRaWAN", "Ignoring application downlink on FPort %u.", unsigned(eventDown.fPort));
+    *lenDown = 0;
+  }
   return state;
 }
 
@@ -354,4 +360,149 @@ bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates) {
     return true;
   }
   return false;
+}
+
+// Radio lifecycle is kept separate from application reporting deadlines. All
+// calls execute on main, outside interrupt context and after clock verification.
+namespace {
+RadioState serviceState = RadioState::Stopped;
+uint32_t serviceTick = 0, phaseStarted = 0, lastJoin = 0;
+int16_t serviceError = 0;
+uint8_t initAttempts = 0, recoveryAttempts = 0, joinFailures = 0, txFailures = 0;
+uint8_t capacityFailures = 0, unavailableFailures = 0;
+uint16_t capacityTried = 0;
+bool joinedAttempted = false;
+constexpr uint32_t RECOVERY_MS = 60000UL;
+
+bool hardwareError(int16_t error) {
+  return error == RADIOLIB_ERR_TX_TIMEOUT || error == RADIOLIB_ERR_RX_TIMEOUT ||
+    error == RADIOLIB_ERR_SPI_WRITE_FAILED || error == RADIOLIB_ERR_SPI_CMD_TIMEOUT ||
+    error == RADIOLIB_ERR_SPI_CMD_INVALID || error == RADIOLIB_ERR_SPI_CMD_FAILED ||
+    error == RADIOLIB_ERR_CHIP_NOT_FOUND;
+}
+bool permanentError(int16_t error) {
+  return error == LW_ERR_INVALID_ARGUMENT || error == LW_ERR_PERSISTENCE ||
+    error == LW_ERR_NONCE_EXHAUSTED || error == LW_ERR_RADIO_GPIO ||
+    error == RADIOLIB_ERR_NULL_POINTER || error == RADIOLIB_ERR_INVALID_PORT ||
+    error == RADIOLIB_ERR_INVALID_REVISION || error == RADIOLIB_ERR_INVALID_MODE ||
+    error == RADIOLIB_ERR_INVALID_DATA_RATE || error == RADIOLIB_ERR_INVALID_FREQUENCY;
+}
+void radioFault(int16_t error) {
+  serviceState = RadioState::Fault; serviceError = error;
+  LOG_ERROR("LoRaWAN", "Radio paused: code=%d; resolve before restarting.", int(error));
+}
+void cooldown() {
+  serviceState = RadioState::Cooldown; phaseStarted = millis(); recoveryAttempts = 0;
+  txFailures = joinFailures = capacityFailures = unavailableFailures = 0;
+  LOG_WARN("LoRaWAN", "Cooling down before radio recovery.");
+}
+void rolloverWait() {
+  const uint32_t now = millis();
+  if(now < UINT32_MAX - LW_TRANSACTION_GUARD_MS) { cooldown(); return; }
+  serviceState = RadioState::Rollover; phaseStarted = now;
+  LOG_INFO("LoRaWAN", "Waiting for timer rollover before radio recovery.");
+}
+}
+void lwServiceStart() {
+  serviceState = RadioState::Initializing; serviceTick = phaseStarted = millis();
+  initAttempts = recoveryAttempts = joinFailures = txFailures = capacityFailures = unavailableFailures = 0;
+  capacityTried = 0; serviceError = 0; joinedAttempted = false;
+}
+void lwServiceStop() { serviceState = RadioState::Stopped; }
+RadioState lwServiceState() { return serviceState; }
+int16_t lwServiceError() { return serviceError; }
+bool lwServiceReady() { return serviceState == RadioState::Ready && lwIsActivated(); }
+void lwServicePoll() {
+  const uint32_t now = millis();
+  if(serviceState == RadioState::Stopped || serviceState == RadioState::Fault) { return; }
+  if(serviceState != RadioState::Rollover && (now < serviceTick || lwTimerRolloverPending())) {
+    if(now < serviceTick) { cooldown(); } else { rolloverWait(); }
+  }
+  serviceTick = now;
+  switch(serviceState) {
+    case RadioState::Initializing:
+      if(initAttempts && uint32_t(now - phaseStarted) < (1000UL << (initAttempts - 1))) { return; }
+      if(lwBegin()) {
+        const int16_t restored = lwRestore();
+        if(!lwPersistenceHealthy() || restored < 0) { radioFault(restored); return; }
+        serviceState = RadioState::Joining; joinedAttempted = false;
+      } else if(++initAttempts >= 3) { radioFault(RADIOLIB_ERR_CHIP_NOT_FOUND); }
+      phaseStarted = millis();
+      return;
+    case RadioState::Joining:
+      if(lwIsActivated()) { serviceState = RadioState::Ready; return; }
+      if(joinedAttempted && uint32_t(now - lastJoin) < 60000UL) { return; }
+      joinedAttempted = true;
+      if(lwActivate() && lwIsActivated()) {
+        serviceState = RadioState::Ready; serviceError = 0;
+        joinFailures = txFailures = 0;
+        LOG_INFO("LoRaWAN", "Joined; scheduler owns sensor delivery timing.");
+      } else {
+        serviceError = lwLastActivationState();
+        if(permanentError(serviceError) || !lwPersistenceHealthy()) { radioFault(serviceError); }
+        else if(serviceError == LW_ERR_TIMER_ROLLOVER) { rolloverWait(); }
+        else if(hardwareError(serviceError)) { if(++joinFailures >= 3) { cooldown(); } }
+        else { joinFailures = 0; }
+      }
+      lastJoin = millis(); return;
+    case RadioState::Ready:
+      if(!lwIsActivated()) { serviceState = RadioState::Joining; joinedAttempted = false; }
+      return;
+    case RadioState::Rollover:
+      if(now < phaseStarted) { cooldown(); }
+      return;
+    case RadioState::Cooldown:
+      if(uint32_t(now - phaseStarted) < RECOVERY_MS) { return; }
+      if(lwRecover()) { serviceState = RadioState::Joining; joinedAttempted = false; capacityTried = 0; }
+      else if(!lwPersistenceHealthy() || ++recoveryAttempts >= 3) { radioFault(LW_ERR_PERSISTENCE); }
+      phaseStarted = millis(); return;
+    default: return;
+  }
+}
+uint32_t lwServiceWait() {
+  if(!lwServiceReady()) { return UINT32_MAX; }
+  const uint32_t wait = lwTimeUntilUplink();
+  if(wait > INT32_MAX) { cooldown(); return UINT32_MAX; }
+  return wait;
+}
+RadioTransaction lwTransmit(const uint8_t* payload, size_t size) {
+  RadioTransaction transaction = {};
+  transaction.result = RADIOLIB_ERR_NETWORK_NOT_JOINED;
+  if(!lwServiceReady()) { return transaction; }
+  if(!payload || !size) { transaction.result = LW_ERR_INVALID_ARGUMENT; return transaction; }
+  transaction.macOnly = size > lwMaxPayloadBytes();
+  transaction.result = lwSendReceive(payload, transaction.macOnly ? 0 : size,
+    transaction.downlink, &transaction.downlinkSize);
+  transaction.applicationSent = transaction.result >= 0 && !transaction.macOnly;
+  serviceError = transaction.result;
+  if(transaction.result < 0) {
+    if(!hardwareError(transaction.result)) { txFailures = 0; }
+    if(transaction.result != RADIOLIB_ERR_PACKET_TOO_LONG && transaction.result != RADIOLIB_ERR_DWELL_TIME_EXCEEDED) { capacityFailures = 0; }
+    if(transaction.result != RADIOLIB_ERR_UPLINK_UNAVAILABLE) { unavailableFailures = 0; }
+  }
+  if(transaction.result >= 0) {
+    txFailures = capacityFailures = unavailableFailures = 0; capacityTried = 0;
+    LOG_INFO("LoRaWAN", "Transaction complete: code=%d, application=%u.",
+      int(transaction.result), unsigned(transaction.applicationSent));
+  } else if(permanentError(transaction.result)) { radioFault(transaction.result); }
+  else if(transaction.result == LW_ERR_TIMER_ROLLOVER) { rolloverWait(); }
+  else if(transaction.result == RADIOLIB_ERR_NETWORK_NOT_JOINED) { serviceState = RadioState::Joining; joinedAttempted = false; }
+  else if(hardwareError(transaction.result)) { if(++txFailures >= 3) { cooldown(); } }
+  else if(transaction.result == RADIOLIB_ERR_PACKET_TOO_LONG || transaction.result == RADIOLIB_ERR_DWELL_TIME_EXCEEDED) {
+    txFailures = 0;
+    if(++capacityFailures >= 3) {
+      capacityFailures = 0;
+      if(!lwTryCapacityDataRate(size, capacityTried)) { radioFault(RADIOLIB_ERR_INVALID_DATA_RATE); }
+    }
+  } else if(transaction.result == RADIOLIB_ERR_UPLINK_UNAVAILABLE && !lwTimeUntilUplink()) {
+    if(++unavailableFailures >= 3) { cooldown(); }
+  } else { txFailures = capacityFailures = 0; }
+  return transaction;
+}
+uint32_t lwGenerateResetCode() {
+  // Public radio entropy API, used only between completed transactions. Assemble
+  // unsigned bytes here to avoid signed-overflow behavior in generic helpers.
+  uint32_t entropy = 0;
+  for(unsigned i = 0; i < 4; ++i) { entropy = (entropy << 8) | gRadio.randomByte(); }
+  return 100000UL + entropy % 900000UL;
 }

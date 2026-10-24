@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
-"""Run the firmware with Bosch's unmodified C++ wrapper and a fake sensor API.
-
-The actual wrapper (including getData's zero return in forced mode) is compiled.
-The lower C sensor API/hardware is simulated; the board build also compiles the
-real C implementation. These checks do not establish physical sensor operation.
-"""
+"""Exercise the raw fallback against Bosch's real wrapper and fake hardware."""
 from pathlib import Path
-import os
-import re
-import shutil
-import subprocess
-import tempfile
-
-ROOT = Path(__file__).resolve().parents[1]
-LIB = Path(os.environ.get('BME68X_UPSTREAM',
-    str(ROOT.parent / '.thermistor-tools/user/libraries/BME68x')))
-RADIO = Path(os.environ.get('RADIOLIB_UPSTREAM',
-    str(ROOT.parent / '.thermistor-tools/user/libraries/RadioLib')))
-
-ARDUINO = r'''
+import os,shutil,subprocess,tempfile
+ROOT=Path(__file__).resolve().parents[1]
+LIB=Path(os.environ.get('BME68X_UPSTREAM',str(ROOT.parent/'.thermistor-tools/user/libraries/BME68x')))
+ARDUINO=r'''
 #pragma once
 #include <cstdint>
 #include <cstddef>
@@ -40,7 +26,7 @@ void delay(unsigned long);void delayMicroseconds(unsigned long);
 inline void pinMode(unsigned,unsigned){}
 inline void digitalWrite(unsigned,unsigned){}
 '''
-WIRE = r'''
+WIRE=r'''
 #pragma once
 #include "Arduino.h"
 struct TwoWire {
@@ -54,15 +40,13 @@ struct TwoWire {
 };
 extern TwoWire Wire,Wire1;
 '''
-FIXTURE = r'''
+FIXTURE=r'''
 #include "Arduino.h"
 #include "Wire.h"
 #include "bme68xLibrary.h"
 #include "sensor_service.h"
-#include "app_service.h"
-#include "lorawan_service.h"
+#include "storage_service.h"
 #include "log_service.h"
-#include "payload_service.h"
 #include <vector>
 #include <cstring>
 #include <limits>
@@ -111,42 +95,10 @@ int8_t bme68x_get_data(uint8_t mode,bme68xData* out,uint8_t* count,bme68x_dev*){
  return failAt==6?BME68X_E_COM_FAIL:(fields?BME68X_OK:BME68X_W_NO_NEW_DATA);
 }
 }
-bool active=false;unsigned joins=0;uint32_t joinedAt=0;std::vector<uint32_t> sends;
-size_t capacity=53;bool macTest=false,stopSensor=false;
-std::vector<std::vector<uint8_t>> packets;
-bool clockBegin(){return true;}bool eepromBootstrap(){return true;}
-bool lwBegin(){return true;}bool lwIsActivated(){return active;}
-int16_t lwRestore(){return 0;}bool lwPersistenceHealthy(){return true;}
-bool lwRecover(){active=false;return true;}
-int16_t lwLastActivationState(){return 0;}
-bool lwActivate(){
- inRadio=true;ticks+=6500;inRadio=false;++joins;active=true;joinedAt=ticks;return true;
-}
-size_t lwMaxPayloadBytes(){return capacity;}uint32_t lwTimeUntilUplink(){return 0;}
-bool lwTryCapacityDataRate(size_t,uint16_t&){return false;}
-int16_t lwSendReceive(const uint8_t* p,size_t n,uint8_t*,size_t* received){
- assert(active && (n==24 || (macTest && n==0)));
- if(n){
-  assert((p[0]>>4)==2);
-  if(failAt==1 || (stopSensor && sends.size()>=1)){
-   assert(p[0]==0x20);for(size_t i=1;i<n;++i)assert(p[i]==0);
-  }else{
-   assert((p[0]&7)==7);
-   int16_t temperature=int16_t((uint16_t(p[1])<<8)|p[2]);
-   assert(temperature==lroundf(reading.temperature*100));
-   assert(p[3]==0x13 && p[4]==0xba && p[5]==0xc3 && p[6]==0x8e);
-   if(reading.status&BME68X_GASM_VALID_MSK)assert(p[0]==0x2f && p[9]==0x30 && p[10]==0x39);
-   else {assert(p[0]==0x27);for(size_t i=7;i<20;++i)assert(p[i]==0);}
-  }
- }
- assert(uint32_t(ticks-joinedAt)>=60000);sends.push_back(ticks);
- packets.emplace_back(p,p+n);
- if(macTest && sends.size()==2)capacity=53;
- if(stopSensor)fields=false;
- inRadio=true;ticks+=2100;inRadio=false;*received=0;return 0;
-}
+std::vector<SensorSnapshot> committed;
+bool storageAppend(const SensorSnapshot& record,uint32_t){committed.push_back(record);return true;}
 void drain(){for(unsigned i=0;i<100;++i)logPump();}
-void advance(uint32_t span){uint32_t start=ticks;while(uint32_t(ticks-start)<span)appLoop();}
+
 SensorData sentinel(){return SensorData{11,22,33333,44,true};}
 void unchanged(const SensorData& data){
  assert(data.temperatureC==11 && data.humidityPct==22 && data.pressurePa==33333 && data.gasOhms==44 && data.gasValid);
@@ -154,6 +106,7 @@ void unchanged(const SensorData& data){
 void convert(){assert(sensorBegin() && sensorTrigger());ticks+=151;}
 int main(int argc,char** argv){
  assert(argc==2);std::string test=argv[1];goodReading();logBegin(115200);
+ AppSettings display=settingsDefaults();display.temperature=TemperatureUnit::Celsius;display.pressure=PressureUnit::Hpa;
  if(test=="forced_sample"){
   SensorData out=sentinel();assert(!sensorFetch(&out) && !sensorLatest(&out) && !sensorLatest(nullptr) && !sensorFetch(nullptr) && !sensorTrigger());unchanged(out);
   assert(sensorBegin() && sensorPresent() && ticks==0 && triggers==0);
@@ -165,16 +118,16 @@ int main(int argc,char** argv){
   SensorData latest{};assert(sensorLatest(&latest) && latest.temperatureC==25.25f);
   assert(!sensorFetch(&out) && sensorBegin() && Wire1.begins==1);
  }else if(test=="ready_timeout_retry"){
-  fields=false;sensorStart();sensorPoll();assert(triggers==1);
-  ticks=151;sensorPoll();assert(sensorPresent());
-  ticks=1150;sensorPoll();assert(sensorPresent());
-  ticks=1151;sensorPoll();assert(!sensorPresent());
-  fields=true;ticks+=59999;sensorPoll();assert(initializations==1);
-  ++ticks;sensorPoll();assert(initializations==2 && triggers==2 && Wire1.begins==1);
-  ticks+=151;sensorPoll();assert(sensorPresent());drain();
+  fields=false;sensorStart();sensorPoll(display);assert(triggers==1);
+  ticks=151;sensorPoll(display);assert(sensorPresent());
+  ticks=1150;sensorPoll(display);assert(sensorPresent());
+  ticks=1151;sensorPoll(display);assert(!sensorPresent());
+  fields=true;ticks+=59999;sensorPoll(display);assert(initializations==1);
+  ++ticks;sensorPoll(display);assert(initializations==2 && triggers==2 && Wire1.begins==1);
+  ticks+=151;sensorPoll(display);assert(sensorPresent());drain();
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
   assert(Serial.output.find("timed out without fresh data")!=std::string::npos);
-  assert(Serial.output.find("T=25.25 C, RH=50.50 %, P=1001.23 hPa, gas=12345 ohm")!=std::string::npos);
+  assert(Serial.output.find("T=25.25 C, RH=50.50 %RH, P=1001.23 mbar")!=std::string::npos);
 #endif
  }else if(test=="init_errors"){
   for(int point=1;point<=4;++point){
@@ -203,19 +156,19 @@ int main(int argc,char** argv){
   reading.status=0;convert();SensorData out=sentinel();assert(!sensorFetch(&out) && sensorPresent());unchanged(out);
   ticks+=1000;assert(!sensorFetch(&out) && !sensorPresent());unchanged(out);
  }else if(test=="rollover_and_logs"){
-  ticks=UINT32_MAX-100;reading.temperature=-0.25f;sensorStart();sensorPoll();sensorStart();
-  ticks+=151;sensorPoll();drain();assert(fetches==1);
+  ticks=UINT32_MAX-100;reading.temperature=-0.25f;sensorStart();sensorPoll(display);sensorStart();
+  ticks+=151;sensorPoll(display);drain();assert(fetches==1);
   SensorSnapshot snapshot{};assert(sensorLatestSnapshot(&snapshot) && snapshot.sampleUptimeSeconds>=4294967);
 #if FW_LOG_LEVEL >= FW_LOG_LEVEL_INFO
   assert(Serial.output.find("T=-0.25 C")!=std::string::npos);
 #endif
-  ticks+=59848;sensorPoll();assert(triggers==1);
-  ++ticks;sensorPoll();assert(triggers==2);
-  ticks+=151;sensorPoll();ticks+=600000;sensorPoll();assert(triggers==3);
-  ticks+=151;sensorPoll();sensorPoll();assert(triggers==3);
+  ticks+=2848;sensorPoll(display);assert(triggers==1);
+  ++ticks;sensorPoll(display);assert(triggers==2);
+  ticks+=151;sensorPoll(display);ticks+=600000;sensorPoll(display);assert(triggers==3);
+  ticks+=151;sensorPoll(display);sensorPoll(display);assert(triggers==3);
  }else if(test=="sample_cache"){
   ticks=UINT32_MAX-100;convert();SensorData out{};assert(sensorFetch(&out));
-  ticks+=65000;assert(sensorLatest(&out) && out.temperatureC==25.25f);
+  ticks+=10000;assert(sensorLatest(&out) && out.temperatureC==25.25f);
   ++ticks;out=sentinel();assert(!sensorLatest(&out));unchanged(out);
   convert();assert(sensorFetch(&out) && sensorLatest(&out));
   assert(sensorTrigger());ticks+=151;failAt=6;assert(!sensorFetch(&out));
@@ -223,56 +176,26 @@ int main(int argc,char** argv){
  }else if(test=="old_conversion"){
   convert();ticks+=90000;SensorData out{};assert(sensorFetch(&out));
   assert(!sensorLatest(&out));
- }else if(test=="app_healthy" || test=="app_sensor_absent" || test=="app_uart_blocked" ||
-          test=="app_mac_only" || test=="app_sensor_stops" || test=="app_gas_unavailable"){
-  varyReading=true;
-  if(test=="app_sensor_absent")failAt=1;
-  if(test=="app_uart_blocked")Serial.ready=false;
-  if(test=="app_mac_only"){macTest=true;capacity=0;}
-  if(test=="app_sensor_stops")stopSensor=true;
-  if(test=="app_gas_unavailable")reading.status&=~BME68X_GASM_VALID_MSK;
-  appSetup();advance(310000);
-  assert(joins==1 && sends.size()==5);
-  assert(sends.front()-joinedAt>=60000 && sends.front()-joinedAt<=60100);
-  for(size_t i=1;i<sends.size();++i)assert(sends[i]-sends[i-1]>=60000 && sends[i]-sends[i-1]<=60200);
-  if(failAt)assert(triggers==0 && initializations>=5 && initializations<=6);
-  else if(!stopSensor)assert(fetches>=5 && triggers>=5 && sensorPresent());
-  if(macTest)assert(packets[0].empty() && packets[1].empty() && packets[2].size()==24);
-  if(test=="app_healthy")assert(packets.front()!=packets.back());
  }else assert(false);
 }
 '''
-
-assert (LIB / 'src/bme68xLibrary.cpp').is_file(), 'Install Bosch BME68x Sensor library (1.3.40408) or set BME68X_UPSTREAM'
-with tempfile.TemporaryDirectory(prefix='thermistor-sensor-') as tmp:
-    folder = Path(tmp)
-    for source in [*ROOT.glob('*.h'), *ROOT.glob('*.cpp')]:
-        if source.name != 'config.h':
-            shutil.copyfile(source, folder / source.name)
-    # Copy dependency sources without edits. Never include live provisioning.
-    shutil.copytree(LIB / 'src', folder / 'bosch')
-    constants = '\n'.join(line for line in (RADIO / 'src/TypeDef.h').read_text().splitlines()
-                         if re.match(r'#define RADIOLIB_ERR_\w+\s+\(-?\d+\)', line))
-    files = {'Arduino.h': ARDUINO, 'Wire.h': WIRE,
-             'SPI.h': '#pragma once\n#include <cstdint>\nstruct SPIClass {uint8_t transfer(uint8_t v){return v;}};\n',
-             'RadioLib.h': '#pragma once\n' + constants,
-             'config.h': '#pragma once\n#define SENSOR_USE_WIRE1 1\n#define SENSOR_I2C_ADDR 0x77\n#define SERIAL_BAUD_RATE 115200\n',
-             'fixture.cpp': FIXTURE}
-    for name, text in files.items():
-        (folder / name).write_text(text)
-    program = folder / 'sensor'
-    cases = ['forced_sample', 'ready_timeout_retry', 'init_errors', 'numeric_validation',
-             'gas_validity', 'stale_data', 'rollover_and_logs',
-             'sample_cache', 'old_conversion', 'app_healthy', 'app_sensor_absent', 'app_uart_blocked',
-             'app_mac_only', 'app_sensor_stops', 'app_gas_unavailable']
-    for level in (0, 3, 5):
-        subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
-                        '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
-                        '-DARDUINO=10819', '-DSENSOR_BSEC_ENABLED=0', '-DFW_LOG_LEVEL=' + str(level),
-                        '-I', str(folder), '-I', str(folder / 'bosch'),
-                        *[str(folder / name) for name in ['sensor_service.cpp', 'app_service.cpp',
-                          'lorawan_timer.cpp', 'log_service.cpp', 'payload_service.cpp', 'bosch/bme68xLibrary.cpp', 'fixture.cpp']],
-                        '-o', str(program)], check=True)
-        for case in cases:
-            subprocess.run([str(program), case], check=True)
-        print('PASS:', len(cases), 'sensor/real-Bosch-wrapper and app integration scenarios at log level', level, flush=True)
+with tempfile.TemporaryDirectory(prefix='raw-sensor-') as temp:
+    folder=Path(temp)
+    for name in ['sensor_service.cpp','sensor_service.h','sensor_types.cpp','sensor_types.h','storage_service.h',
+                 'app_settings.h','app_settings.cpp','settings_defaults.h','log_service.h','log_service.cpp','log_config.h','firmware_features.h']:
+        shutil.copyfile(ROOT/name,folder/name)
+    shutil.copytree(LIB/'src',folder/'bosch')
+    files={'Arduino.h':ARDUINO,'Wire.h':WIRE,
+           'SPI.h':'#pragma once\n#include <cstdint>\nstruct SPIClass {uint8_t transfer(uint8_t v){return v;}};\n',
+           'config.h':'#pragma once\n#define SENSOR_USE_WIRE1 1\n#define SENSOR_I2C_ADDR 0x77\n','fixture.cpp':FIXTURE}
+    for name,text in files.items():(folder/name).write_text(text)
+    cases=['forced_sample','ready_timeout_retry','init_errors','numeric_validation','gas_validity',
+           'stale_data','rollover_and_logs','sample_cache','old_conversion']
+    for level in [0,3,5]:
+        exe=folder/'sensor'
+        subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-ffunction-sections','-fdata-sections','-Wl,--gc-sections','-DSENSOR_BSEC_ENABLED=0','-DARDUINO=10819',
+                        '-DFW_LOG_LEVEL='+str(level),'-I',str(folder),'-I',str(folder/'bosch'),
+                        *[str(folder/name) for name in ['sensor_service.cpp','sensor_types.cpp','app_settings.cpp','log_service.cpp','bosch/bme68xLibrary.cpp','fixture.cpp']],
+                        '-o',str(exe)],check=True)
+        for case in cases:subprocess.run([str(exe),case],check=True)
+        print('PASS: 9 raw-sensor timing/validation/publication cases at log level',level,flush=True)

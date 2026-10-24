@@ -10,13 +10,15 @@ NODE = shutil.which('node')
 assert NODE, 'Node.js is required to check the JavaScript decoder'
 
 ENCODER_FIXTURE = r'''
-#include "payload_service.h"
+#include "encoder_service.h"
+#include "settings_defaults.h"
 #include <cmath>
 #include <cstdio>
 void emit(const SensorData& sample) {
- uint8_t bytes[ENVIRONMENT_PACKET_SIZE];
- if(payloadEncodeEnvironment(bytes,sizeof(bytes),&sample)!=11)throw 1;
- for(uint8_t byte:bytes)printf("%02x",unsigned(byte));
+ uint8_t bytes[25];SensorSnapshot record{};record.environment=sample;
+ if(encoderSensorPacket(bytes,sizeof(bytes),record,settingsDefaults())!=25)throw 1;
+ bytes[0]=0x10|(bytes[0]&15);
+ for(unsigned i=0;i<11;++i)printf("%02x",unsigned(bytes[i]));
  puts("");
 }
 int main(){
@@ -123,14 +125,15 @@ console.log('PASS: actual firmware encoder -> both decoder APIs, all validity ma
 with tempfile.TemporaryDirectory(prefix='thermistor-decoder-') as tmp:
     folder = Path(tmp)
     # This encoder includes public headers only; no provisioning config is read.
-    (folder / 'Arduino.h').write_text('#pragma once\n')
+    from host_support import prepare
+    prepare(folder)
     (folder / 'encoder.cpp').write_text(ENCODER_FIXTURE)
     (folder / 'check.js').write_text(NODE_TEST)
     program = folder / 'encoder'
     subprocess.run(['g++', '-std=c++11', '-Wall', '-Wextra', '-Werror',
                     '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
                     '-I', str(folder), '-I', str(ROOT), str(folder / 'encoder.cpp'),
-                    str(ROOT / 'payload_service.cpp'), '-o', str(program)], check=True)
+                    str(folder / 'encoder_service.cpp'), str(folder / 'app_settings.cpp'), str(folder / 'sensor_types.cpp'), '-o', str(program)], check=True)
     packets = subprocess.check_output([str(program)], text=True)
     subprocess.run([NODE, str(folder / 'check.js'), str(ROOT / 'decoders/environment_v1.js')],
                    input=packets, text=True, check=True)

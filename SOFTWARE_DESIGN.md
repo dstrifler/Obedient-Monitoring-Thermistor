@@ -1,9 +1,9 @@
 # Obedient Monitoring Thermistor — Software Constitution
 
-**Revision:** 2  
+**Revision:** 3  
 **Established:** October 23, 2026 (America/Chicago)  
 **Updated:** October 23, 2026 (America/Chicago)  
-**Status:** Functional wizard decisions recorded. Remaining engineering work is
+**Status:** Owner authorized implementation against the wizard decisions. Engineering work is
 identified in [Section 12](#12-decisions-and-remaining-engineering-work).
 
 ## 1. Purpose and authority
@@ -17,8 +17,8 @@ Agreed requirements in this document guide implementation. The decision register
 records the selected behavior; its engineering work items identify specifications
 and verification still needed before the affected code or protocol changes.
 
-This revision updates the design only. Resume firmware implementation in
-separately requested, reviewable steps. Previously started, unpublished drafts
+Firmware implementation is now authorized in reviewable steps against this
+design. Previously started, unpublished drafts
 do not establish design decisions and must be reconciled with this document
 before use.
 
@@ -243,8 +243,10 @@ the outcome and relevant eligibility information; scheduler plans the next
 application attempt.
 
 Queued command replies may use the next eligible application uplink before a
-normal sensor report is due. A command reply or health packet does not itself
-reset the normal sensor-report deadline or satisfy the first-sensor-report gate.
+normal sensor report is due. A command reply does not reset the normal
+sensor-report deadline. Regular health packets occupy the selected reporting
+slots in fixed mode, so sensor loss/recovery does not cause extra early reports.
+Neither command replies nor health packets satisfy the first-sensor-report gate.
 
 Space application uplink attempts at least **one minute** apart, including
 retries after uncertain failures. RadioLib can perform protocol-required work
@@ -530,3 +532,4 @@ compromise or a new product decision, amend this document before making it.
 | --- | --- | --- |
 | 1 | 2026-10-23 | Established six services, direct three-second acquisition-to-ring flow, one-hour RAM history, canonical measurement units with presentation preferences, factory defaults, calibration/persistence boundaries, OTA command scope, and marker-free complete reset. Kept unresolved startup, adaptive, protocol, and failure behaviors explicit. |
 | 2 | 2026-10-23 | Recorded wizard decisions for six-minute/all-seven startup, ring commit notifications and ring-based adaptive behavior, mode-specific health cadence, atomic saved settings, fresh intervals, prompt replies, complete-report deferral, and a RAM-only six-digit factory-reset challenge with one-hour expiry, ordinary reporting without polling, and bounded erase-failure halt. Separated resolved functional direction from required engineering specifications. |
+| 3 | 2026-10-23 | Owner authorized the firmware rewrite. Clarified that fixed-mode health packets occupy normal reporting slots through sensor loss/recovery; separate command replies do not reset sensor deadlines. No factory defaults or reset-confirmation choices changed. |

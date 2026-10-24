@@ -140,11 +140,9 @@ bool sensorFetch(SensorData* data) {
   if(!isfinite(raw.temperature) || raw.temperature < -40.0f || raw.temperature > 85.0f ||
      !isfinite(raw.humidity) || raw.humidity < 0.0f || raw.humidity > 100.0f ||
      !isfinite(raw.pressure) || raw.pressure < 30000.0f || raw.pressure > 110000.0f) {
-    LOG_WARN("Sensor", "Invalid T/P/H reading discarded; retry in 60 seconds.");
-    gSensorPresent = false;
-    gMeasurementPending = false;
-    gHaveLatestSample = false;
-    return false;
+    // Preserve independently valid fields. Consumers use the shared validity
+    // mask; a numeric failure does not require bus recovery or a slow retry.
+    LOG_WARN("Sensor", "Invalid T/P/H field; preserving other available measurements.");
   }
 
   SensorData sample = {};

@@ -7,6 +7,7 @@
 #include "settings_defaults.h"
 
 // Atomic snapshot of one acquisition, including derived outputs when available.
+// A successful acquisition can be partial; check sensorValidMask before use.
 bool sensorLatestSnapshot(SensorSnapshot* data);
 
 // Main-thread lifecycle/persistence/Serial. Completed acquisitions are committed
@@ -16,12 +17,14 @@ void sensorPoll(const AppSettings& settings = settingsDefaults());
 // Cooperative stop: caller polls until the acquisition worker has exited.
 bool sensorStop();
 
-// Copies the latest validated sample (10 seconds). Missing, failed,
-// or stale acquisition returns false and leaves *data unchanged.
+// Copies the latest acquisition (10 seconds), with independent field validity.
+// Invalid fields follow sensorValidMask rules; they do not fail the whole copy.
+// Missing, failed, or stale acquisition returns false and leaves *data unchanged.
 bool sensorLatest(SensorData* data);
 
 // Manual raw-backend conversions; unavailable when BSEC owns the sensor.
 // Fetch returns false while pending/on failure and leaves *data unchanged.
+// A completed conversion returns true even when some numeric fields are invalid.
 bool sensorBegin();
 bool sensorTrigger();
 bool sensorFetch(SensorData* data);

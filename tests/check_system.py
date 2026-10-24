@@ -115,6 +115,31 @@ int main(int argc,char** argv){
   warmed();source.airQuality.validMask=0;advance(500000);assert(sensors()>=2);
   assert((packets.back().bytes[19]&0x70)==0);
   sensorOkay=false;const size_t before=controls();advance(725000);assert(controls()>=before+2&&schedulerIntervalMs()==360000);
+ }else if(test=="availability_recovery"){
+  warmed();source.airQuality.validMask=3;advance(4000000);
+  assert(schedulerIntervalMs()==SCHEDULER_MAX_MS);
+  const size_t before=sensors();source.airQuality.validMask=7;
+  advance(5000);assert(schedulerIntervalMs()==SCHEDULER_MAX_MS); // Fewer than three matching readings.
+  advance(6000);assert(schedulerIntervalMs()<=SCHEDULER_BASE_MS || sensors()>before);
+  advance(SCHEDULER_BASE_MS+5000);assert(sensors()>before && (packets.back().bytes[19]&0x40));
+  advance(90000);assert(schedulerIntervalMs()>SCHEDULER_BASE_MS); // Delivered event does not remain pending.
+ }else if(test=="availability_loss_during_rf"){
+  warmed();advance(4000000);assert(schedulerIntervalMs()==SCHEDULER_MAX_MS);
+  const size_t before=sensors();source.airQuality.validMask=3;
+  delay(180000); // Worker commits continue while main is blocked by RF work.
+  advance(5000);assert(schedulerIntervalMs()<=SCHEDULER_BASE_MS || sensors()>before);
+  advance(SCHEDULER_BASE_MS+5000);
+  assert(sensors()>before && (packets.back().bytes[19]&0x40)==0);
+ }else if(test=="transient_availability"){
+  warmed();advance(4000000);const size_t before=sensors();
+  source.airQuality.validMask=3;advance(3000);source.airQuality.validMask=7;advance(45000);
+  assert(schedulerIntervalMs()==SCHEDULER_MAX_MS && sensors()==before);
+ }else if(test=="fixed_partial_availability"){
+  AppSettings s=settingsDefaults();s.mode=ReportMode::Fixed;s.intervalMinutes=2;assert(storageSaveSettings(s));
+  warmed();const size_t before=sensors();const uint32_t due=packets.back().time+120000;
+  source.airQuality.validMask=3;advance(15000);source.airQuality.validMask=7;
+  advance(uint32_t(due-ticks)-100);assert(sensors()==before && schedulerIntervalMs()==120000);
+  advance(500);assert(sensors()==before+1);
  }else if(test=="batch_and_fresh_interval"){
   warmed();const uint32_t accepted=ticks;
   command({193,1,0,1,3,1,1,2,2,3,0});
@@ -172,6 +197,23 @@ int main(int argc,char** argv){
   memcpy(EEPROM.bytes+32,record,15);appSetup();
   assert(appSettings().temperature==TemperatureUnit::Celsius&&appSettings().pressure==PressureUnit::Pa);
   assert(appSettings().mode==ReportMode::Dynamic&&appSettings().intervalMinutes==15&&EEPROM.puts==0);
+ }else if(test=="log_ceiling"){
+  AppSettings saved=settingsDefaults();saved.serialLevel=5;assert(storageSaveSettings(saved));appSetup();
+  assert(appSettings().serialLevel==5 && unsigned(logGetLevel())==unsigned(FW_LOG_LEVEL));
+  command({193,1,0,1,1,3,0}); // Unrelated temperature change with a higher saved verbosity.
+  assert(appSettings().temperature==TemperatureUnit::Celsius && appSettings().serialLevel==5);
+  assert(replies[0].result==CommandResult::Accepted && replies[0].kind==ReplyKind::Configuration);
+  AppSettings loaded{};assert(storageLoadSettings(&loaded) && settingsEqual(loaded,appSettings()));
+  command({193,4,0,2}); // Factory INFO preference is valid even in OFF/ERROR builds.
+  assert(settingsEqual(appSettings(),settingsDefaults()) && replies[1].result==CommandResult::Accepted);
+  assert(unsigned(logGetLevel())==unsigned(FW_LOG_LEVEL<3?FW_LOG_LEVEL:3));
+  command({193,1,0,3,1,7,5});assert(appSettings().serialLevel==5 && replies[2].result==CommandResult::Accepted);
+  assert(unsigned(logGetLevel())==unsigned(FW_LOG_LEVEL));
+  const auto before=appSettings();const unsigned writes=EEPROM.puts;
+  command({193,1,0,4,1,7,6});assert(settingsEqual(before,appSettings()) && EEPROM.puts==writes);
+  EEPROM.failWrite=true;command({193,1,0,5,2,3,0,7,0});
+  assert(settingsEqual(before,appSettings()) && replies[4].result==CommandResult::SaveFailed);
+  assert(unsigned(logGetLevel())==unsigned(FW_LOG_LEVEL));
  }else if(test=="concurrency"){
   assert(storageBegin());ticks=100000;
   std::atomic<bool> done(false);std::atomic<unsigned> commits(0);
@@ -193,9 +235,10 @@ int main(int argc,char** argv){
 '''
 CASES = ['startup', 'startup_missing', 'fixed_missing', 'fixed_cadence', 'fixed_failure_recovery', 'steady_and_ring',
          'isolated_outlier', 'sustained_change', 'partial_and_total_failure', 'batch_and_fresh_interval',
+         'availability_recovery', 'availability_loss_during_rf', 'transient_availability', 'fixed_partial_availability',
          'batch_rejection_and_dedup', 'capacity_and_failures', 'reset_expiry_and_no_polling',
          'confirmed_reset', 'erase_failure', 'stop_failure', 'settings_and_calibration',
-         'legacy_settings', 'concurrency', 'timer_wrap', 'clock_fault_and_uart', 'uart_backpressure']
+         'legacy_settings', 'log_ceiling', 'concurrency', 'timer_wrap', 'clock_fault_and_uart', 'uart_backpressure']
 with tempfile.TemporaryDirectory(prefix='monitor-system-') as temp:
     folder=Path(temp);prepare(folder);(folder/'fixture.cpp').write_text(FIXTURE)
     exe=compile_host(folder,['fixture.cpp','storage_service.cpp','eeprom_service.cpp','bsec_state.cpp',
@@ -204,3 +247,12 @@ with tempfile.TemporaryDirectory(prefix='monitor-system-') as temp:
     for case in CASES:
         subprocess.run([str(exe),case],check=True)
         print('PASS:',case,flush=True)
+    # The supported compile-time ceiling caps output without changing the
+    # validity or persistence of application preferences and OTA batches.
+    for level in range(5):
+        exe=compile_host(folder,['fixture.cpp','storage_service.cpp','eeprom_service.cpp','bsec_state.cpp',
+                                 'app_settings.cpp','sensor_types.cpp','sensor_service.cpp','scheduler_service.cpp',
+                                 'encoder_service.cpp','log_service.cpp'],'system-level-'+str(level),
+                         flags=['-DFW_LOG_LEVEL='+str(level)])
+        subprocess.run([str(exe),'log_ceiling'],check=True)
+        print('PASS: settings with compile-time log ceiling',level,flush=True)

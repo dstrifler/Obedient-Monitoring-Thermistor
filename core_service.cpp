@@ -203,6 +203,8 @@ void updateUptime() {
   const uint32_t now = millis(); uptimeMs += uint32_t(now - uptimeTick); uptimeTick = now;
 }
 NodeStatus nodeStatus() {
+  // Radio work may have blocked since the last management tick.
+  updateUptime();
   NodeStatus result = {};
   result.uptimeSeconds = uint32_t(uptimeMs / 1000ULL);
   result.ringCount = uint16_t(storageCount());

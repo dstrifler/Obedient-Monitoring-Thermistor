@@ -25,6 +25,7 @@ bool clockOkay=true,clockChecked=false,radioReady=false,joinOkay=true,sensorOkay
 bool stopped=false,stopNever=false;unsigned reboots=0,stops=0;
 uint32_t acquired=0;uint64_t fullTime=0;SensorSnapshot source{};
 int txResult=0;size_t radioCapacity=53;uint32_t eligibility=0;
+uint32_t txDelay=2100;bool injectStatus=false;
 struct Packet {uint32_t time;std::vector<uint8_t> bytes;};std::vector<Packet> packets;
 uint32_t millis(){return ticks;}uint32_t micros(){return ticks*1000;}
 void acquire(){
@@ -59,7 +60,13 @@ RadioTransaction lwTransmit(const uint8_t* bytes,size_t n){
  RadioTransaction result={};result.result=txResult;result.macOnly=n>radioCapacity;
  result.applicationSent=txResult>=0&&!result.macOnly;
  packets.push_back({ticks,result.macOnly?std::vector<uint8_t>():std::vector<uint8_t>(bytes,bytes+n)});
- delay(2100);return result;
+ delay(txDelay);
+ if(injectStatus){
+  const uint8_t request[]={193,3,0,100};
+  memcpy(result.downlink,request,sizeof(request));result.downlinkSize=sizeof(request);
+  result.result=1;injectStatus=false;
+ }
+ return result;
 }
 #include "core_service.h"
 #include "lorawan_service.h"
@@ -224,6 +231,19 @@ int main(int argc,char** argv){
   }done.store(true);});
   while(!done.load()) {StoredReading r{};if(storageRead(0,&r))assert(r.sample.environment.gasOhms==uint32_t(r.sample.airQuality.co2EquivalentPpm));}
   writer.join();assert(commits>19000&&storageCount()<=1200);
+ }else if(test=="status_after_blocking_radio" || test=="status_after_radio_wrap"){
+  if(test=="status_after_radio_wrap"){ticks=UINT32_MAX-500000;eligibility=ticks;fullTime=ticks;}
+  warmed();command({193,2,0,90});injectStatus=true;txDelay=180000;
+  advance(61000); // GetStatus arrives in the receive window after a long transaction.
+  bool found=false;
+  for(unsigned i=0;i<replyCount;++i){
+   const auto& reply=replies[(replyHead+i)%QUEUE_SIZE];
+   if(reply.requestId==100){
+    found=true;assert(reply.kind==ReplyKind::Status);
+    assert(reply.status.uptimeSeconds==uint32_t(fullTime/1000));
+   }
+  }
+  assert(found&&!injectStatus);
  }else if(test=="timer_wrap"){
   ticks=UINT32_MAX-500000;eligibility=ticks;fullTime=ticks;warmed();advance(400000);
   assert(schedulerLearningComplete()&&sensors()>=1&&storageCount()>200);
@@ -239,7 +259,8 @@ CASES = ['startup', 'startup_missing', 'fixed_missing', 'fixed_cadence', 'fixed_
          'availability_recovery', 'availability_loss_during_rf', 'transient_availability', 'fixed_partial_availability',
          'batch_rejection_and_dedup', 'capacity_and_failures', 'reset_expiry_and_no_polling',
          'confirmed_reset', 'erase_failure', 'stop_failure', 'settings_and_calibration',
-         'legacy_settings', 'log_ceiling', 'concurrency', 'timer_wrap', 'clock_fault_and_uart', 'uart_backpressure']
+         'legacy_settings', 'log_ceiling', 'concurrency', 'timer_wrap', 'status_after_blocking_radio',
+         'status_after_radio_wrap', 'clock_fault_and_uart', 'uart_backpressure']
 with tempfile.TemporaryDirectory(prefix='monitor-system-') as temp:
     folder=Path(temp);prepare(folder)
     (folder/'core_management.inc').write_text((ROOT/'core_service.cpp').read_text().split('// Core management.\n',1)[1])

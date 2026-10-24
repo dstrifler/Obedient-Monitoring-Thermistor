@@ -1,7 +1,7 @@
 #ifndef SCHEDULER_SERVICE_H
 #define SCHEDULER_SERVICE_H
 
-#include "protocol_types.h"
+#include "common.h"
 #include "lorawan_service.h"
 
 static constexpr uint32_t SCHEDULER_MIN_MS = 60000UL;

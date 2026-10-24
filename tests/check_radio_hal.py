@@ -98,8 +98,7 @@ tx_methods = ''.join(function(sx_source, sig) for sig in [
 ])
 
 HARNESS = r'''
-#include "radio_hal.h"
-#include "radio_hal.h"
+#include "hal_fixture.inc"
 #include "am_mcu_apollo.h"
 #include "platform/mbed_critical.h"
 #include <algorithm>
@@ -247,8 +246,8 @@ with tempfile.TemporaryDirectory(prefix='thermistor-radio-hal-') as tmp:
     files = {'Arduino.h': ARDUINO, 'SPI.h': SPI, 'src/BuildOpt.h': BUILD,
              'src/BuildOptUser.h': '', 'RadioLib.h': '#pragma once\n#include "src/TypeDef.h"\n',
              'am_mcu_apollo.h': AMB, 'platform/mbed_critical.h': CRITICAL,
-             'radio_hal.h': (ROOT / 'radio_hal.h').read_text(),
-             'radio_hal.cpp': (ROOT / 'radio_hal.cpp').read_text(), 'main.cpp': HARNESS}
+             'hal_fixture.inc': '#include <RadioLib.h>\n#include <hal/Arduino/ArduinoHal.h>\n#include <am_mcu_apollo.h>\n#include <platform/mbed_critical.h>\n' + (ROOT/'lorawan_service.cpp').read_text().split('// Private Apollo3 radio HAL.\n',1)[1].split('// Private LoRa rollover timing.\n',1)[0],
+             'main.cpp': HARNESS}
     for name, content in files.items():
         dest = folder / name
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -256,8 +255,8 @@ with tempfile.TemporaryDirectory(prefix='thermistor-radio-hal-') as tmp:
     flags = ['-std=c++11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-variable',
              '-I', str(folder), '-I', str(folder / 'src')]
     subprocess.run(['g++', *flags, '-x', 'c++', '-fsyntax-only', '-'],
-                   input='#include "radio_hal.h"\n#include "radio_hal.h"\n', text=True, check=True)
-    print('PASS: public HAL header compiles independently against stock RadioLib interfaces', flush=True)
-    sources = ['src/Hal.cpp', 'src/hal/Arduino/ArduinoHal.cpp', 'radio_hal.cpp', 'main.cpp']
+                   input='#include "hal_fixture.inc"\n', text=True, check=True)
+    print('PASS: private HAL implementation compiles independently against stock RadioLib interfaces', flush=True)
+    sources = ['src/Hal.cpp', 'src/hal/Arduino/ArduinoHal.cpp', 'main.cpp']
     subprocess.run(['g++', *flags, *[str(folder / p) for p in sources], '-o', str(folder / 'check')], check=True)
     subprocess.run([str(folder / 'check')], check=True)

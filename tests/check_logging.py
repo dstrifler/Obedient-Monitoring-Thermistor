@@ -235,3 +235,27 @@ int main(){
  assert(Serial.output=="[TRACE][T] visible\r\n");
 }
 ''')
+
+run('cooperative_state_machine', 5, r'''
+int main(){
+ assert(logState()==LogState::Stopped);logBegin(115200);assert(logState()==LogState::Idle);
+ LOG_INFO("State","queued");assert(logState()==LogState::Queued);
+ Serial.ready=false;logPump();assert(logState()==LogState::Backpressured && Serial.output.empty());
+ Serial.ready=true;Serial.quota=5;logPump();assert(logState()==LogState::Backpressured);
+ Serial.quota=-1;drain();assert(logState()==LogState::Idle);
+ assert(Serial.output=="[INFO][State] queued\r\n");
+ LOG_WARN("State","discard when disabled");logSetLevel(LogLevel::OFF);
+ assert(logState()==LogState::Disabled);drain();
+ logSetLevel(LogLevel::INFO);assert(logState()==LogState::Idle);
+ LOG_INFO("State","enabled");assert(logState()==LogState::Queued);drain();assert(logState()==LogState::Idle);
+ Serial.output.clear();logSetLevel(LogLevel::ERROR);Serial.ready=false;
+ for(unsigned i=0;i<13;++i)LOG_ERROR("State","E%u",i);
+ assert(logDroppedCount(LogLevel::ERROR)==1);Serial.ready=true;drain();
+ assert(logState()==LogState::Idle && Serial.output.find('\0')==std::string::npos);
+ assert(std::count(Serial.output.begin(),Serial.output.end(),'\n')==12);
+}
+''')
+run('compiled_off_state', 0, r'''
+int main(){logBegin(115200);assert(logState()==LogState::Disabled);LOG_ERROR("State","hidden");
+ logPump();assert(Serial.output.empty() && Serial.begins==0);}
+''')

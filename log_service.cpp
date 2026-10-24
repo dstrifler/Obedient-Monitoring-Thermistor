@@ -21,6 +21,16 @@ uint8_t gLogHead = 0, gLogCount = 0;
 uint32_t gLogDropped[6] = {};
 bool gLogReady = false, gLogDropNoticePending = false;
 LogLevel gRuntimeLevel = LogLevel(FW_LOG_LEVEL < 3 ? FW_LOG_LEVEL : 3);
+LogState gLogState = LogState::Stopped;
+bool gLogBackpressured = false;
+
+void logUpdateState() {
+  if(!gLogReady) { gLogState = LogState::Stopped; }
+  else if(gRuntimeLevel == LogLevel::OFF) { gLogState = LogState::Disabled; }
+  else if(gLogCount || gLogDropNoticePending) {
+    gLogState = gLogBackpressured ? LogState::Backpressured : LogState::Queued;
+  } else { gLogState = LogState::Idle; gLogBackpressured = false; }
+}
 
 bool logEnabled(LogLevel level) {
   unsigned value = static_cast<unsigned>(level);
@@ -31,6 +41,7 @@ void logDropped(LogLevel level) {
   uint32_t& count = gLogDropped[static_cast<unsigned>(level)];
   if(count != UINT32_MAX) { ++count; }
   gLogDropNoticePending = true;
+  logUpdateState();
 }
 bool logMakeRoom(LogLevel level) {
   uint8_t limit = level <= LogLevel::WARN ? LOG_SLOTS : LOG_SLOTS - LOG_RESERVED_SLOTS;
@@ -69,16 +80,21 @@ void logDropNotice() {
 void logSetLevel(LogLevel level) {
   if(unsigned(level) <= 5) {
     gRuntimeLevel = LogLevel(unsigned(level) < FW_LOG_LEVEL ? unsigned(level) : FW_LOG_LEVEL);
-    if(gRuntimeLevel == LogLevel::OFF) { gLogHead = gLogCount = 0; gLogDropNoticePending = false; }
+    if(gRuntimeLevel == LogLevel::OFF) {
+      gLogHead = gLogCount = 0; gLogDropNoticePending = false; gLogBackpressured = false;
+    }
+    logUpdateState();
   }
 }
 LogLevel logGetLevel() { return gRuntimeLevel; }
+LogState logState() { return gLogState; }
 
 void logBegin(unsigned long baud) {
   if(gLogReady) { return; }
   Serial.begin(baud);
   Serial.set_blocking(false);
   gLogReady = true;
+  logUpdateState();
 }
 
 void logWrite(LogLevel level, const char* module, const char* format, ...) {
@@ -105,6 +121,7 @@ void logWrite(LogLevel level, const char* module, const char* format, ...) {
   record.sent = 0;
   record.level = level;
   ++gLogCount;
+  logUpdateState();
 }
 
 void logPump() {
@@ -114,14 +131,19 @@ void logPump() {
     if(gLogCount == 0) {
       if(!gLogDropNoticePending) { break; }
       logDropNotice();
+      // The overflow notice may be filtered by runtime verbosity. An empty
+      // queue has no record to emit; remain idle instead of sending stale data.
+      if(gLogCount == 0) { break; }
     }
     // Apollo3 UART::write() itself waits for readiness even in nonblocking
     // mode. Check before each single-byte write; no other writer may race us.
-    if(!Serial.writeable()) { break; }
+    if(!Serial.writeable()) { gLogBackpressured = true; break; }
+    gLogBackpressured = false;
     LogRecord& record = logAt(0);
-    if(Serial.write(static_cast<uint8_t>(record.text[record.sent])) != 1) { break; }
+    if(Serial.write(static_cast<uint8_t>(record.text[record.sent])) != 1) { gLogBackpressured = true; break; }
     if(++record.sent == record.length) { gLogHead = (gLogHead + 1) % LOG_SLOTS; --gLogCount; }
   }
+  logUpdateState();
 }
 
 uint32_t logDroppedCount(LogLevel level) {
@@ -147,6 +169,7 @@ void logHex(LogLevel level, const char* module, const uint8_t* data, size_t len)
 #else
 void logSetLevel(LogLevel) {}
 LogLevel logGetLevel() { return LogLevel::OFF; }
+LogState logState() { return LogState::Disabled; }
 void logBegin(unsigned long) {}
 void logPump() {}
 uint32_t logDroppedCount(LogLevel) { return 0; }

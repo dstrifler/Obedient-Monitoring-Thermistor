@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory(prefix='bsec-packet-') as tmp:
     subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation',
                     '-ffunction-sections','-fdata-sections','-Wl,--gc-sections',
                     '-I',str(folder),'-I',str(ROOT),str(folder/'fixture.cpp'),
-                    str(folder/'encoder_service.cpp'),str(folder/'app_settings.cpp'),str(folder/'sensor_types.cpp'),'-o',str(exe)],check=True)
+                    str(folder/'encoder_service.cpp'),str(folder/'common.cpp'),'-o',str(exe)],check=True)
     data=subprocess.check_output([str(exe)],text=True)
     subprocess.run(['node',str(folder/'check.js'),str(ROOT/'decoders/environment_v1.js')],
                    input=data,text=True,check=True)

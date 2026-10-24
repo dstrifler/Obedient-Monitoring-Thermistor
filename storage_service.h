@@ -1,8 +1,7 @@
 #ifndef STORAGE_SERVICE_H
 #define STORAGE_SERVICE_H
 
-#include "sensor_types.h"
-#include "app_settings.h"
+#include "common.h"
 #include <stddef.h>
 #include <stdint.h>
 

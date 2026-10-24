@@ -1,3 +1,6 @@
+> Historical filenames below describe the earlier layout. Current firmware uses
+> seven service pairs plus `common.h/.cpp`; see [FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md).
+
 > Historical debugging notes. Current behavior is defined in [SOFTWARE_DESIGN.md](SOFTWARE_DESIGN.md); use [SENSOR_TEST.md](SENSOR_TEST.md) for builds and board checks.
 
 # Environmental uplink test and firmware architecture

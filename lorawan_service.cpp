@@ -1,18 +1,160 @@
 #include "lorawan_service.h"
+#include "storage_service.h"
+#include "log_service.h"
+#include "config.h"
 #include <Arduino.h>
-#include <RadioLib.h>
+#include <hal/Arduino/ArduinoHal.h>
+#include <am_mcu_apollo.h>
+#include <platform/mbed_critical.h>
 #include <limits.h>
 #include <string.h>
 
-#include "config.h"
+// Private Apollo3 radio HAL.
+
+namespace {
+// Firmware-owned Apollo3 GPIO handling through RadioLib's public HAL interface.
+// All SPI, timing and radio protocol operations remain in stock RadioLib.
+class Apollo3RadioHal : public ArduinoHal {
+public:
+  Apollo3RadioHal(SPIClass& spi, uint32_t dio1Pin, uint32_t dio1Pad);
+  void init() override;
+  void pinMode(uint32_t pin, uint32_t mode) override;
+  void attachInterrupt(uint32_t interruptNum, void (*callback)(void), uint32_t mode) override;
+  void detachInterrupt(uint32_t interruptNum) override;
+  uint32_t status() const;
+
+private:
+  void recordStatus(uint32_t result);
+  bool maskDio1Interrupt();  // Masks just DIO1; releases the global critical section.
+  void restoreDio1Polling();  // Caller holds the critical section.
+  const uint32_t dio1Pin_;
+  const uint32_t dio1Pad_;
+  uint32_t status_ = 0;
+};
+
+Apollo3RadioHal::Apollo3RadioHal(SPIClass& spi, uint32_t dio1Pin, uint32_t dio1Pad)
+  : ArduinoHal(spi), dio1Pin_(dio1Pin), dio1Pad_(dio1Pad) {}
+
+void Apollo3RadioHal::init() {
+  status_ = AM_HAL_STATUS_SUCCESS;
+  ArduinoHal::init();
+}
+
+void Apollo3RadioHal::recordStatus(uint32_t result) {
+  if(status_ == AM_HAL_STATUS_SUCCESS && result != AM_HAL_STATUS_SUCCESS) {
+    status_ = result;
+  }
+}
+
+uint32_t Apollo3RadioHal::status() const { return status_; }
+
+bool Apollo3RadioHal::maskDio1Interrupt() {
+  if(dio1Pad_ >= AM_HAL_GPIO_MAX_PADS) {
+    recordStatus(AM_HAL_STATUS_INVALID_ARG);
+    return false;
+  }
+  const uint64_t mask = uint64_t(1) << dio1Pad_;
+  core_util_critical_section_enter();
+  recordStatus(am_hal_gpio_interrupt_disable(mask));
+  recordStatus(am_hal_gpio_interrupt_clear(mask));
+  core_util_critical_section_exit();
+  return true;
+}
+
+void Apollo3RadioHal::restoreDio1Polling() {
+  if(dio1Pad_ >= AM_HAL_GPIO_MAX_PADS) {
+    recordStatus(AM_HAL_STATUS_INVALID_ARG);
+    return;
+  }
+  const uint64_t mask = uint64_t(1) << dio1Pad_;
+  recordStatus(am_hal_gpio_interrupt_disable(mask));
+  // Apollo3 INTDIR_NONE forces input reads to zero. A complete input config
+  // explicitly restores READPIN; ordinary Arduino pinMode(INPUT) need not.
+  // Leave the hardware IRQ masked while no receive callback is registered.
+  recordStatus(am_hal_gpio_pinconfig(dio1Pad_, g_AM_HAL_GPIO_INPUT));
+  recordStatus(am_hal_gpio_interrupt_clear(mask));
+}
+
+void Apollo3RadioHal::pinMode(uint32_t pin, uint32_t mode) {
+  ArduinoHal::pinMode(pin, mode);
+  if(pin == dio1Pin_ && mode == GpioModeInput) {
+    core_util_critical_section_enter();
+    restoreDio1Polling();
+    core_util_critical_section_exit();
+  }
+}
+
+void Apollo3RadioHal::detachInterrupt(uint32_t interruptNum) {
+  if(interruptNum != pinToInterrupt(dio1Pin_)) {
+    ArduinoHal::detachInterrupt(interruptNum);
+    return;
+  }
+  if(!maskDio1Interrupt()) { return; }
+  // Arduino callback management may allocate or lock an RTOS mutex. Keep it
+  // outside global critical sections, with just the DIO1 hardware IRQ masked.
+  ArduinoHal::detachInterrupt(interruptNum);
+  core_util_critical_section_enter();
+  restoreDio1Polling();
+  core_util_critical_section_exit();
+}
+
+void Apollo3RadioHal::attachInterrupt(uint32_t interruptNum, void (*callback)(void), uint32_t mode) {
+  if(interruptNum != pinToInterrupt(dio1Pin_)) {
+    ArduinoHal::attachInterrupt(interruptNum, callback, mode);
+    return;
+  }
+  if(callback == nullptr) {
+    detachInterrupt(interruptNum);
+    return;
+  }
+  if(!maskDio1Interrupt()) { return; }
+  // In particular, the first attach constructs InterruptIn and can allocate.
+  ArduinoHal::attachInterrupt(interruptNum, callback, mode);
+  const uint64_t mask = uint64_t(1) << dio1Pad_;
+  core_util_critical_section_enter();
+  recordStatus(am_hal_gpio_interrupt_clear(mask));
+  if(status_ == AM_HAL_STATUS_SUCCESS) {
+    recordStatus(am_hal_gpio_interrupt_enable(mask));
+  }
+  core_util_critical_section_exit();
+}
+
+} // namespace
+
+// Private LoRa rollover timing.
+namespace {
+
+// RadioLib 7.1.2 uses absolute uint32_t timestamps inside blocking calls.
+// Leave ten minutes for a complete US915 Class A transaction, including up to
+// 15 NbTrans repetitions and the maximum 16-second RX2 delay, plus PHY/CPU
+// margin. Do not start another transaction in this interval. Revisit this
+// budget when changing region, modem, or the library's blocking behavior.
+static constexpr uint32_t LW_TRANSACTION_GUARD_MS = 10UL * 60UL * 1000UL;
+
+bool lwTimerRolloverPending();
+
+bool lwTimerRolloverPending() {
+  return millis() >= UINT32_MAX - LW_TRANSACTION_GUARD_MS;
+}
+} // namespace
+
+// LoRa transport and lifecycle.
+namespace {
+bool lwBegin();
+bool lwIsActivated();
+int16_t lwRestore();
+bool lwRecover();
+bool lwActivate();
+int16_t lwLastActivationState();
+bool lwPersistenceHealthy();
+int16_t lwSendReceive(const uint8_t* dataUp, size_t lenUp, uint8_t* dataDown, size_t* lenDown);
+size_t lwMaxPayloadBytes();
+uint32_t lwTimeUntilUplink();
+bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates);
 
 #if !defined(LORA_USE_OTAA) || (LORA_USE_OTAA != 1)
 #error "OTAA required: ABP needs durable session and frame-counter storage."
 #endif
-#include "storage_service.h"
-#include "lorawan_timer.h"
-#include "log_service.h"
-#include "radio_hal.h"
 
 static_assert(LW_ERR_RADIO_GPIO != LW_ERR_TIMER_ROLLOVER, "Local radio errors must be distinct");
 // NM180100 connects DIO1 to Apollo3 pad 40 (module datasheet table 8).
@@ -74,7 +216,6 @@ static uint8_t gSNwkSIntKey[] = { LORA_SNWKS_INT_KEY };
 #endif
 
 static uint8_t gLWnonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
-
 
 // ============================================================
 // LORAWAN INIT
@@ -361,6 +502,8 @@ bool lwTryCapacityDataRate(size_t requiredBytes, uint16_t& triedRates) {
   }
   return false;
 }
+
+} // namespace
 
 // Radio lifecycle is kept separate from application reporting deadlines. All
 // calls execute on main, outside interrupt context and after clock verification.

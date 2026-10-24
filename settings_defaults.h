@@ -1,7 +1,7 @@
 #ifndef SETTINGS_DEFAULTS_H
 #define SETTINGS_DEFAULTS_H
 
-#include "app_settings.h"
+#include "common.h"
 
 // Factory application preferences. Provisioning and board/radio constants stay
 // in config.h. Valid saved application settings take precedence over defaults.

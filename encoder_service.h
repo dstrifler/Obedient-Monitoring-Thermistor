@@ -1,8 +1,7 @@
 #ifndef ENCODER_SERVICE_H
 #define ENCODER_SERVICE_H
 
-#include "protocol_types.h"
-#include "sensor_types.h"
+#include "common.h"
 #include "lorawan_service.h"
 
 // Codec functions are pure; the send entry point completes the scheduler's

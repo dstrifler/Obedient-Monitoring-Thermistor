@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from host_support import FLASH, STORAGE_LINK_FLAGS
 
 ROOT=Path(__file__).resolve().parents[1]
 BSEC=Path(os.environ.get('BSEC_UPSTREAM',str(ROOT.parent/'work/Bosch-BSEC2-Library')))
@@ -69,6 +70,8 @@ EEPROM=r'''
 struct EEPROMFake {
  uint8_t bytes[512];unsigned puts=0;bool failWrite=false;
  EEPROMFake(){memset(bytes,255,sizeof(bytes));}
+ int init(){assert(!inWorker);return 0;}
+ void setLength(unsigned n){assert(n==512);}
  uint8_t read(size_t index){assert(!inWorker && index<512);return bytes[index];}
  template<class T>void put(size_t index,const T& data){
   assert(!inWorker && heldLocks==0 && index+sizeof(T)<=512);++puts;
@@ -82,7 +85,7 @@ FIXTURE=r'''
 #include "EEPROM.h"
 #include "bsec2.h"
 #include "sensor_service.h"
-#include "bsec_state.h"
+#include "storage_service.h"
 #include "log_service.h"
 #include <cstring>
 #include <string>
@@ -90,15 +93,10 @@ FIXTURE=r'''
 uint32_t ticks=0;bool inWorker=false;unsigned heldLocks=0,threadStarts=0,logs=0;
 void logWrite(LogLevel,const char*,const char*,...){assert(!inWorker);++logs;}
 TwoWire Wire,Wire1;EEPROMFake EEPROM;
-bool nonceStoreBegin(){return true;}
-bool nonceStoreSave(const uint8_t*){return true;}
-bool nonceStoreLoad(uint8_t*,size_t){return false;}
-bool nonceStoreErase(){return true;}
 int sensorError=0;unsigned begins=0,triggers=0,fetches=0,initializations=0,steps=0,controls=0;
 bme68xData reading{};uint16_t heaterTemperature=0,heaterDuration=0;bool haveFields=true;
 int controlStatus=0,stepStatus=0;bool rejectState=false;unsigned sets=0,stateGets=0;
 bool hideVoc=false,initializing=false;
-bool eepromBootstrap(){return true;}
 extern "C" {
 bsec_library_return_t bsec_init(){assert(inWorker);++initializations;return BSEC_OK;}
 bsec_library_return_t bsec_set_configuration(const uint8_t*,uint32_t n,uint8_t*,uint32_t w){
@@ -140,7 +138,7 @@ bsec_library_return_t bsec_get_state(uint8_t,uint8_t* state,uint32_t capacity,ui
  assert(inWorker && capacity==238);++stateGets;memset(state,0x42,238);*size=238;return BSEC_OK;
 }
 }
-#include "bsec_service.cpp"
+#include "sensor_service.cpp"
 void workerTick(){assert(!inWorker);inWorker=true;workerStep();inWorker=false;}
 void advance(uint32_t span){uint32_t start=ticks;while(uint32_t(ticks-start)<span){workerTick();ticks+=10;}}
 void goodReading(){reading={};reading.temperature=20.25;reading.humidity=55.5;reading.pressure=98765;
@@ -150,17 +148,17 @@ int main(int argc,char** argv){
  if(test=="state"){
   uint8_t state[238],loaded[238];memset(state,0x42,238);memset(loaded,0xaa,238);
   for(unsigned i=0;i<128;++i)EEPROM.bytes[i]=uint8_t(i);
-  assert(!bsecStateLoad(loaded,238,0x26103304) && loaded[0]==0xaa);
-  assert(bsecStateSave(state,238,0x26103304) && EEPROM.puts==1);
+  assert(!storageLoadCalibration(loaded,238,0x26103304) && loaded[0]==0xaa);
+  assert(storageSaveCalibration(state,238,0x26103304) && EEPROM.puts==1);
   for(unsigned i=0;i<128;++i)assert(EEPROM.bytes[i]==uint8_t(i));
-  assert(bsecStateLoad(loaded,238,0x26103304)==238 && memcmp(state,loaded,238)==0);
-  assert(!bsecStateLoad(loaded,237,0x26103304) && !bsecStateSave(state,239,0x26103304) && !bsecStateSave(nullptr,1,0x26103304));
-  for(unsigned i=128;i<382;++i){EEPROM.bytes[i]^=1;assert(!bsecStateLoad(loaded,238,0x26103304));EEPROM.bytes[i]^=1;}
-  EEPROM.failWrite=true;state[0]^=1;assert(!bsecStateSave(state,238,0x26103304));
+  assert(storageLoadCalibration(loaded,238,0x26103304)==238 && memcmp(state,loaded,238)==0);
+  assert(!storageLoadCalibration(loaded,237,0x26103304) && !storageSaveCalibration(state,239,0x26103304) && !storageSaveCalibration(nullptr,1,0x26103304));
+  for(unsigned i=128;i<382;++i){EEPROM.bytes[i]^=1;assert(!storageLoadCalibration(loaded,238,0x26103304));EEPROM.bytes[i]^=1;}
+  EEPROM.failWrite=true;state[0]^=1;assert(!storageSaveCalibration(state,238,0x26103304));
   return 0;
  }
  if(test=="restore" || test=="reject_restore"){
-  uint8_t state[238]={};assert(bsecStateSave(state,238,0x26103304));rejectState=test=="reject_restore";
+  uint8_t state[238]={};assert(storageSaveCalibration(state,238,0x26103304));rejectState=test=="reject_restore";
  }
  if(test=="rollover")ticks=UINT32_MAX-500;
  if(test=="retry")sensorError=BME68X_E_COM_FAIL;
@@ -256,25 +254,26 @@ int main(int argc,char** argv){
 '''
 with tempfile.TemporaryDirectory(prefix='bsec-service-') as tmp:
     folder=Path(tmp)
-    for name in ['bsec_service.cpp','bsec_service.h','bsec_state.cpp','bsec_state.h',
-                 'sensor_service.cpp','sensor_service.h','storage_service.cpp','storage_service.h','sensor_types.cpp','sensor_types.h','app_settings.cpp','app_settings.h','settings_defaults.h','nonce_store.h','firmware_features.h']:
+    for name in ['sensor_service.cpp','sensor_service.h','storage_service.cpp','storage_service.h',
+                 'common.cpp','common.h','settings_defaults.h','log_service.h']:
         shutil.copyfile(ROOT/name,folder/name)
     files={'Arduino.h':ARDUINO,'Wire.h':WIRE,'mbed.h':MBED,
            'bsec2.h':SENSOR,'EEPROM.h':EEPROM,'fixture.cpp':FIXTURE,
            'config.h':'#pragma once\n#define SENSOR_I2C_ADDR 0x77\n#define SENSOR_USE_WIRE1 1\n',
-           'eeprom_service.h':'#pragma once\n#define EEPROM_ADDR_SETTINGS_BASE 32\n#define EEPROM_ADDR_SETTINGS_END 96\n#define EEPROM_TOTAL_BYTES 512\nbool eepromBootstrap();\n'}
+           'FlashIAPBlockDevice.h': FLASH,
+           'RadioLib.h': '#pragma once\n#define RADIOLIB_LORAWAN_NONCES_BUF_SIZE 18\n'}
     for name,content in files.items():(folder/name).write_text(content)
     # Use production compile-time logging macros, including printf checking.
-    for name in ['log_service.h','log_config.h']:
+    for name in ['log_service.h']:
         shutil.copyfile(ROOT/name,folder/name)
     exe=folder/'bsec'
     cases=['healthy','gas_invalid','retry','rollover','restore','reject_restore','state',
            'missing_fields','errors','warning','save_retry','save_interval','partial_output','initializing',
            'invalid_numeric','invalid_humidity','invalid_pressure','all_invalid','direct_ring_and_stop']
     for level in [0,3,5]:
-        subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-DFW_LOG_LEVEL='+str(level),
+        subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-DFW_LOG_LEVEL='+str(level),*STORAGE_LINK_FLAGS,
                         '-I',str(folder),'-I',str(BSEC/'src'),'-I',str(BME/'src'),str(folder/'fixture.cpp'),
-                        str(folder/'sensor_service.cpp'),str(folder/'storage_service.cpp'),str(folder/'sensor_types.cpp'),str(folder/'app_settings.cpp'),str(folder/'bsec_state.cpp'),'-o',str(exe)],check=True)
+                        str(folder/'storage_service.cpp'),str(folder/'common.cpp'),'-o',str(exe)],check=True)
         for case in cases:
             subprocess.run([str(exe),case],check=True)
         print('PASS:',len(cases),'BSEC acquisition/publication/calibration/status cases at log level',level,flush=True)

@@ -61,6 +61,12 @@ zero permitted. Startup health and subsequent total-failure health use six
 minutes in dynamic mode or the selected fixed interval. BSEC acquisition is
 independent of these report deadlines.
 
+Validate temperature, humidity, pressure, and gas independently. A numeric
+failure leaves the other raw fields available and does not pause acquisition or
+reinitialize BSEC. An acquisition lacking valid T/P/H or gas inputs omits derived
+BSEC outputs; normal processing resumes on the next usable conversion. Bus and
+algorithm failures still use the bounded recovery path.
+
 ## Dynamic reporting method
 
 The scheduler examines ring data on commit notifications in dynamic mode.
@@ -85,7 +91,18 @@ Analysis uses reusable statistical scratch memory, not another sensor history:
 6. Smooth interval decreases with a one-minute half-life; allow increases at at
    most one second per elapsed second. These rates depend on elapsed time, not
    how many commit notifications arrive. A detected sustained availability loss
-   keeps a report pending within the baseline until its partial record is sent.
+   or recovery keeps a report pending within the baseline until a sensor report
+   is sent.
+
+Readiness changes are debounced independently of value statistics. Inspect the
+newest consecutive acquisitions in the ring: at least three matching readiness
+observations spanning six seconds must occur within thirty seconds, without
+crossing a stale acquisition gap. Compare qualified fields with the previously
+evaluated readiness mask, starting with all seven at the first complete report.
+That mask is scheduling state, not cached measurement values. A single transient
+does not change it. This handles both returning fields and commit notifications
+coalesced during blocking RF work; no particular old bin must still contain the
+transition. Fixed mode does not run this analysis or accelerate its schedule.
 
 The scheduler learns before first TX but does not change delivery timing until
 a complete first sensor packet succeeds locally. There is no separate last-sent
@@ -123,6 +140,10 @@ interval; they do not restart acquisition, clear history, or bypass startup
 requirements. Runtime Serial verbosity supports all six levels in the default
 build; `FW_LOG_LEVEL` can deliberately set a lower compile-time ceiling. Startup
 timing diagnostics use INFO until persisted application settings are restored.
+The saved verbosity remains a preference in the range OFF–TRACE. The build
+ceiling caps actual output without invalidating that preference, other OTA
+changes, or factory application defaults. Configuration replies report the saved
+preference; `logGetLevel()` returns the effective capped level.
 
 Reply and retry caches are bounded at eight entries each. Cached request IDs
 prevent repeated settings writes or deadline restarts within that window.

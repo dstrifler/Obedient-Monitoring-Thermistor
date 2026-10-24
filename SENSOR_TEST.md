@@ -95,9 +95,11 @@ BSEC_UPSTREAM=/path/to/Bosch-BSEC2-Library bash tools/check-board.sh
    Verify the reply, fresh interval, persistence after reboot, and continued
    acquisition/radio operation. Defaults mode is dynamic; fixed accepts 1–60.
 7. Check that a missing field after startup is flagged without losing other
-   fields. A total sensor failure uses six-minute health in dynamic mode or the
-   chosen interval in fixed mode. Restoring the sensor must not force a radio
-   rejoin merely because acquisition failed.
+   fields. Sustained losses and recoveries should bring dynamic reporting within
+   the six-minute baseline; one transient should not. Fixed mode keeps its
+   selected interval. A total sensor failure uses six-minute health in dynamic
+   mode or the chosen interval in fixed mode. Restoring the sensor must not force
+   a radio rejoin merely because acquisition failed.
 8. After BSEC reports high accuracy and calibration has actually been saved,
    reboot and verify calibration restore. LoRa still performs a fresh OTAA join
    with durable nonce history. Ring history and learning restart in RAM.
@@ -117,6 +119,10 @@ to maximum calibration accuracy is promised.
 See [FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md) for the test commands,
 service map, adaptive method and persistence layout. Board compilation uses the
 actual stock Bosch binary; host BSEC tests simulate its opaque public API.
+Host regressions inject invalid T/P/H independently, verify continued partial
+publication and recovery without BSEC reinitialization, and cover availability
+transitions during blocked main-thread radio work. Settings checks also exercise
+every compile-time Serial ceiling, including OFF, with saved TRACE preferences.
 Physical calibration, concurrent I2C/RF behavior, and Helium delivery still need
 the board tests above.
 

@@ -1,8 +1,8 @@
 # Obedient Monitoring Thermistor — Software Constitution
 
-**Revision:** 5  
+**Revision:** 6<br>
 **Established:** October 23, 2026 (America/Chicago)  
-**Updated:** October 24, 2026 (America/Chicago)  
+**Updated:** October 25, 2026 (America/Chicago)<br>
 **Status:** Owner authorized implementation against the wizard decisions. Engineering work is
 identified in [Section 12](#12-decisions-and-remaining-engineering-work).
 
@@ -239,6 +239,15 @@ minute to one hour**. Calculate behavior from the live acquisition history in
 the ring. Repeated unusual results and sustained fast movement should
 progressively shorten intervals; fewer unusual results and steadier behavior
 should favor longer intervals.
+
+Use a **linear activity-to-interval mapping**: bound the highest available
+metric activity score to **1–60**, retaining fractional values, then calculate
+`target interval in minutes = 61 - activity score`. Scores of 1, 6, 30, and 60
+request 60, 55, 31, and 1 minutes respectively. Activity below 1 requests one
+hour; activity above 60 requests one minute. Keep the existing history-based
+scoring, metric influence, median filtering, availability handling, and elapsed-time
+schedule smoothing. The six-minute baseline still governs startup and
+insufficient-history fallback; it is not the center of the linear mapping.
 
 **One unexpected reading must not wildly swing reporting timing.** Use the
 surrounding history and persistence of change to moderate outliers. Evaluate
@@ -605,3 +614,4 @@ compromise or a new product decision, amend this document before making it.
 | 3 | 2026-10-23 | Owner authorized the firmware rewrite. Clarified that fixed-mode health packets occupy normal reporting slots through sensor loss/recovery; separate command replies do not reset sensor deadlines. No factory defaults or reset-confirmation choices changed. |
 | 4 | 2026-10-24 | Added logging as the seventh service with explicit cooperative Serial queue, verbosity, overflow, and backpressure ownership. Required one combined header/implementation pair per service, no sub-service pairs or source fragments, and common.h/.cpp for shared contracts/pure helpers. Preserve the Arduino entry point, immutable config, factory defaults, crystal discipline, and working crystal-radio startup during consolidation. |
 | 5 | 2026-10-24 | Extended the factory-reset confirmation window to two hours and added a separate two-step remote reboot with the same deadline and Class A delivery rules. Permit one pending operation, bind confirmation to its operation, and preserve all persisted data on reboot. |
+| 6 | 2026-10-25 | Owner authorized a trial of linear dynamic reporting: bound activity to 1–60 and use `61 - activity` minutes. Preserve three-second acquisition, history scoring, metric influence, startup/fallback gates, availability handling, and existing schedule smoothing. |

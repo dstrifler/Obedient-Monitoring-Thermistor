@@ -113,11 +113,8 @@ Analysis uses reusable statistical scratch memory, not another sensor history:
 4. Compare the latest available 90 seconds with that baseline. Recent movement
    and persistent departures from the local trend contribute activity. Metrics
    are evaluated independently; missing fields do not dilute an active field.
-5. Bound the highest metric activity score to 1–60, preserving fractional
-   values, then set target minutes to `61 - activity`. Scores of 1, 6, 30,
-   and 60 request 60, 55, 31, and 1 minutes respectively. Quiet activity below
-   1 requests one hour; activity above 60 requests one minute. Insufficient
-   history still uses six minutes.
+5. Convert activity to an interval around the six-minute baseline, clamped to
+   60–3,600 seconds. Insufficient history uses six minutes.
 6. Smooth interval decreases with a one-minute half-life; allow increases at at
    most one second per elapsed second. These rates depend on elapsed time, not
    how many commit notifications arrive. A detected sustained availability loss

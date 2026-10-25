@@ -137,10 +137,8 @@ uint32_t intervalFromHistory() {
   }
   if(availabilityChanged && firstSensor) { availabilityPending = true; }
   if(!anyLearned) { return SCHEDULER_BASE_MS; }
-  // Linear activity scale: 1 requests 60 minutes, 30 requests 31 minutes,
-  // and 60 requests one minute. Preserve fractional scores for smooth targets.
-  const float boundedActivity = std::max(1.0f, std::min(60.0f, activity));
-  const uint32_t target = uint32_t((61.0f - boundedActivity) * 60000.0f);
+  const float seconds = activity > 0.1f ? 360.0f / activity : 3600.0f;
+  const uint32_t target = uint32_t(std::max(60.0f, std::min(3600.0f, seconds)) * 1000);
   return availabilityChanged ? std::min(target, SCHEDULER_BASE_MS) : target;
 }
 }

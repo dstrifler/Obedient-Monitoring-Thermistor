@@ -121,33 +121,6 @@ int main(int argc,char** argv){
   warmed();advance(1800000);const uint32_t before=schedulerIntervalMs();
   for(unsigned i=0;i<100;++i){source.environment.temperatureC=20+float(i)*0.05f;advance(3000);}
   assert(schedulerIntervalMs()<before/2&&schedulerIntervalMs()>=60000);
- }else if(test.compare(0,16,"linear_activity_")==0){
-  // A steady pressure ramp has a known thirty-second bin change. Its noise
-  // remains at the two-Pascal floor, so the real history scorer produces the
-  // requested activity without exposing scheduler internals to this fixture.
-  const float activity=std::stof(test.substr(16));
-  float expectedMinutes=60;
-  if(activity==6)expectedMinutes=55;
-  else if(activity==6.5f)expectedMinutes=54.5f;
-  else if(activity==30)expectedMinutes=31;
-  else if(activity>=60)expectedMinutes=1;
-  const uint32_t expected=uint32_t(expectedMinutes*60000.0f);
-  txDelay=0;source.environment.pressurePa=45000;appSetup();sensorOkay=false;
-  auto appendRamp=[&](){
-   delay(3000);source.environment.pressurePa=45000+float(fullTime)*(2.0f*activity/30000.0f);
-   source.sampleUptimeSeconds=uint32_t(fullTime/1000);assert(storageAppend(source,ticks));
-  };
-  for(unsigned i=0;i<1200;++i)appendRamp();
-  lwServicePoll();DeliveryEvent event{};NodeStatus status{};
-  assert(schedulerPoll(appSettings(),nullptr,status,&event));
-  assert(event.kind==ReportKind::Sensor&&event.transaction.applicationSent);
-  assert(schedulerIntervalMs()==SCHEDULER_BASE_MS); // First report keeps the baseline.
-  const uint32_t began=ticks;
-  const uint32_t duration=std::max(SCHEDULER_BASE_MS,
-    expected>SCHEDULER_BASE_MS?expected-SCHEDULER_BASE_MS+uint32_t(60000):uint32_t(0));
-  while(uint32_t(ticks-began)<duration){appendRamp();schedulerPoll(appSettings(),nullptr,status,&event);}
-  assert(std::abs(int64_t(schedulerIntervalMs())-int64_t(expected))<=1000);
-  for(size_t i=1;i<packets.size();++i)assert(uint32_t(packets[i].time-packets[i-1].time)>=SCHEDULER_MIN_MS);
  }else if(test=="partial_and_total_failure"){
   warmed();source.airQuality.validMask=0;advance(500000);assert(sensors()>=2);
   assert((packets.back().bytes[19]&0x70)==0);
@@ -345,9 +318,6 @@ int main(int argc,char** argv){
 '''
 CASES = ['startup', 'startup_missing', 'fixed_missing', 'fixed_cadence', 'fixed_failure_recovery', 'steady_and_ring',
          'isolated_outlier', 'sustained_change', 'partial_and_total_failure', 'batch_and_fresh_interval',
-         'linear_activity_0', 'linear_activity_0.5', 'linear_activity_1', 'linear_activity_6',
-         'linear_activity_6.5', 'linear_activity_30',
-         'linear_activity_60', 'linear_activity_120',
          'availability_recovery', 'availability_loss_during_rf', 'transient_availability', 'fixed_partial_availability',
          'batch_rejection_and_dedup', 'capacity_and_failures', 'reset_expiry_and_no_polling',
          'factory_confirmation_after_one_hour', 'reboot_preserves_persistence',

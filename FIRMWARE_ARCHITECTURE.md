@@ -90,9 +90,18 @@ independent of these report deadlines.
 
 Validate temperature, humidity, pressure, and gas independently. A numeric
 failure leaves the other raw fields available and does not pause acquisition or
-reinitialize BSEC. An acquisition lacking valid T/P/H or gas inputs omits derived
-BSEC outputs; normal processing resumes on the next usable conversion. Bus and
-algorithm failures still use the bounded recovery path.
+reinitialize BSEC. Subscribe to `BSEC_OUTPUT_RAW_PRESSURE` alongside the seven
+derived/status outputs so BSEC enables pressure acquisition through its public
+API. A skipped pressure channel is unavailable even if its compensated number
+is within range; store NaN so the shared validity mask, Serial formatter, and
+packet encoder cannot present stale pressure as a fresh measurement.
+
+An acquisition lacking valid temperature/humidity, gas, or pressure required by
+BSEC's current process mask omits derived BSEC outputs. If BSEC does not request
+pressure, the remaining valid inputs may still produce air-quality outputs.
+Normal processing resumes on the next usable conversion. Bus and algorithm
+failures still use the bounded recovery path. Stored pressure and BSEC C inputs
+use Pa; packet scaling and decoder display conversions remain independent.
 
 ## Dynamic reporting method
 

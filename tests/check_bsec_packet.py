@@ -35,6 +35,10 @@ int main(){
  sample.airQuality.breathVocEquivalentPpm=0;
  sample.airQuality.iaq=501;sample.airQuality.co2EquivalentPpm=65536;emit(&sample);
  emit(nullptr);
+ // Pressures above uint16_t range must be scaled before packing. A skipped
+ // sensor channel uses NaN and must stay unavailable through the decoder.
+ const float pressures[]={100334.0f,98790.0f,NAN};
+ for(float pressure:pressures){sample.environment.pressurePa=pressure;emit(&sample);}
  uint8_t shortBuffer[24];memset(shortBuffer,0xa5,sizeof(shortBuffer));
  assert(!encoderSensorPacket(shortBuffer,23,sample,settingsDefaults()) && shortBuffer[0]==0xa5);
  assert(!encoderSensorPacket(nullptr,25,sample,settingsDefaults()));
@@ -45,7 +49,7 @@ const assert=require('assert'),fs=require('fs'),vm=require('vm');
 const api={};vm.runInNewContext(fs.readFileSync(process.argv[2],'utf8'),api);
 const packets=fs.readFileSync(0,'utf8').trim().split(/\s+/).map(s=>Array.from(Buffer.from(s,'hex')));
 const decode=bytes=>JSON.parse(JSON.stringify(api.Decoder(bytes,1)));
-assert.strictEqual(packets.length,19);
+assert.strictEqual(packets.length,22);
 for(let mask=0;mask<8;mask++){
  const bytes=packets[mask],d=decode(bytes);
  assert.strictEqual(bytes.length,25);assert.strictEqual(bytes[0],0x3f);
@@ -79,6 +83,16 @@ assert.strictEqual(decode(packets[17]).co2_equivalent_ppm,null);
 const absent=decode(packets[18]);
 assert.strictEqual(absent.valid_mask,0);assert.strictEqual(absent.air_quality_valid_mask,0);
 assert.strictEqual(absent.breath_voc_equivalent_ppm,null);
+for(const [index,pressure] of [[19,100334],[20,98790]]){
+ const bytes=packets[index],d=decode(bytes);
+ assert.strictEqual(bytes[5]*256+bytes[6],pressure/2);
+ assert.strictEqual(d.pressure_pa,pressure);assert.strictEqual(d.pressure_hpa,pressure/100);
+ assert.strictEqual(d.pressure,pressure/3386.389);assert.strictEqual(d.pressure_unit,'inHg');
+}
+const skippedPressure=decode(packets[21]);
+assert.strictEqual(skippedPressure.valid_mask&4,0);
+assert.strictEqual(packets[21][5],0);assert.strictEqual(packets[21][6],0);
+assert.strictEqual(skippedPressure.pressure_pa,null);assert.strictEqual(skippedPressure.pressure,null);
 // Never throw/disable Helium on malformed v2 inputs, then recover on valid data.
 for(const exponent of [0x7f800000,0x7fc00000,0xff800000,0xbf800000]){
  const buffer=Buffer.from(packets[7]);buffer.writeUInt32BE(exponent,15);

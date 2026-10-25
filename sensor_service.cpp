@@ -105,7 +105,9 @@ static bool workerBegin(uint32_t now) {
   const uint8_t ids[] = {BSEC_OUTPUT_IAQ, BSEC_OUTPUT_CO2_EQUIVALENT,
     BSEC_OUTPUT_BREATH_VOC_EQUIVALENT, BSEC_OUTPUT_STABILIZATION_STATUS,
     BSEC_OUTPUT_RUN_IN_STATUS, BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
-    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY};
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
+    // BSEC skips pressure acquisition unless this output is subscribed.
+    BSEC_OUTPUT_RAW_PRESSURE};
   bsec_sensor_configuration_t requested[sizeof(ids)] = {};
   for(size_t i = 0; i < sizeof(ids); ++i) {
     requested[i].sensor_id = ids[i];
@@ -142,15 +144,18 @@ static void workerFetch(uint32_t now) {
   if(count) { gBme.getData(raw); }  // Return value is fields remaining, not success.
   if(!count || !(raw.status & BME68X_NEW_DATA_MSK)) { return; }
   gPending = false;
-  const bool tphValid = isfinite(raw.temperature) && raw.temperature >= -40 && raw.temperature <= 85 &&
-    isfinite(raw.humidity) && raw.humidity >= 0 && raw.humidity <= 100 &&
-    isfinite(raw.pressure) && raw.pressure >= 30000 && raw.pressure <= 110000;
+  // A skipped pressure channel can still contain a plausible compensated
+  // value. Numeric range and the shared new-data flag do not prove it ran.
+  const float pressurePa = gSettings.pressure_oversampling != BME68X_OS_NONE ? raw.pressure : NAN;
+  const bool temperatureHumidityValid = isfinite(raw.temperature) && raw.temperature >= -40 && raw.temperature <= 85 &&
+    isfinite(raw.humidity) && raw.humidity >= 0 && raw.humidity <= 100;
+  const bool pressureValid = isfinite(pressurePa) && pressurePa >= 30000 && pressurePa <= 110000;
   // A numeric failure belongs to this acquisition, not the entire device.
   // Publish independently valid raw fields and keep the normal cadence. BSEC
   // outputs are unavailable until a conversion has all required valid inputs.
-  if(!tphValid) { diagnostic(-1004); }
+  if(!temperatureHumidityValid || !pressureValid) { diagnostic(-1004); }
   SensorSnapshot sample = {};
-  sample.environment = {raw.temperature, raw.humidity, raw.pressure, 0, false};
+  sample.environment = {raw.temperature, raw.humidity, pressurePa, 0, false};
   const uint8_t gasMask = BME68X_GASM_VALID_MSK | BME68X_HEAT_STAB_MSK;
   const bool gasValid = (raw.status & gasMask) == gasMask &&
     isfinite(raw.gas_resistance) && raw.gas_resistance > 0 && double(raw.gas_resistance) <= UINT32_MAX;
@@ -160,13 +165,14 @@ static void workerFetch(uint32_t now) {
   }
   const uint64_t completedMs = gTimeMs - uint32_t(now - gTriggerMs) + gWaitMs;
   sample.sampleUptimeSeconds = uint32_t(completedMs / 1000ULL);
-  if(gasValid && tphValid) {
+  const bool pressureRequired = gSettings.process_data & BSEC_PROCESS_PRESSURE;
+  if(gasValid && temperatureHumidityValid && (!pressureRequired || pressureValid)) {
     bsec_input_t inputs[BSEC_MAX_PHYSICAL_SENSOR] = {};
     uint8_t nInputs = 0;
     const int64_t stamp = int64_t(completedMs) * 1000000LL;
     addInput(inputs, nInputs, BSEC_INPUT_TEMPERATURE, raw.temperature, stamp);
     addInput(inputs, nInputs, BSEC_INPUT_HUMIDITY, raw.humidity, stamp);
-    addInput(inputs, nInputs, BSEC_INPUT_PRESSURE, raw.pressure, stamp); // Pa, per public C API.
+    addInput(inputs, nInputs, BSEC_INPUT_PRESSURE, pressurePa, stamp); // Pa, per public C API.
     addInput(inputs, nInputs, BSEC_INPUT_GASRESISTOR, raw.gas_resistance, stamp);
     addInput(inputs, nInputs, BSEC_INPUT_HEATSOURCE, 0.0f, stamp);
     addInput(inputs, nInputs, BSEC_INPUT_PROFILE_PART, raw.gas_index, stamp);

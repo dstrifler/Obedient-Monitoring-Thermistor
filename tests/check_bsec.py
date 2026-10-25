@@ -52,15 +52,18 @@ SENSOR=r'''
 using bme68xData=bme68x_data;
 extern int sensorError;extern unsigned begins,triggers,fetches;
 extern bme68xData reading;extern uint16_t heaterTemperature,heaterDuration;
+extern uint8_t configuredPressureOversampling;
 extern bool haveFields;
 class Bme68x {public:int8_t status=0;
  void begin(uint8_t address,TwoWire& wire){assert(inWorker && address==0x77 && &wire==&Wire1);++begins;status=sensorError;}
- void setTPH(uint8_t,uint8_t,uint8_t){assert(inWorker);status=sensorError;}
+ void setTPH(uint8_t,uint8_t pressure,uint8_t){assert(inWorker);configuredPressureOversampling=pressure;status=sensorError;}
  void setHeaterProf(uint16_t temperature,uint16_t duration){assert(inWorker);heaterTemperature=temperature;heaterDuration=duration;status=sensorError;}
  uint32_t getMeasDur(uint8_t mode){assert(inWorker && mode==BME68X_FORCED_MODE);return 45001;}
  void setOpMode(uint8_t mode){assert(inWorker && mode==BME68X_FORCED_MODE);++triggers;status=sensorError;}
  uint8_t fetchData(){assert(inWorker);++fetches;status=sensorError;return haveFields?1:0;}
- uint8_t getData(bme68xData& out){out=reading;return 0;}
+ uint8_t getData(bme68xData& out){out=reading;
+  if(configuredPressureOversampling==BME68X_OS_NONE)out.pressure=69596; // Plausible stale value.
+  return 0;}
 };
 '''
 EEPROM=r'''
@@ -95,6 +98,8 @@ void logWrite(LogLevel,const char*,const char*,...){assert(!inWorker);++logs;}
 TwoWire Wire,Wire1;EEPROMFake EEPROM;
 int sensorError=0;unsigned begins=0,triggers=0,fetches=0,initializations=0,steps=0,controls=0;
 bme68xData reading{};uint16_t heaterTemperature=0,heaterDuration=0;bool haveFields=true;
+uint8_t configuredPressureOversampling=0;
+bool pressureSubscribed=false,forcePressureOff=false,forcePressureRequired=false;
 int controlStatus=0,stepStatus=0;bool rejectState=false;unsigned sets=0,stateGets=0;
 bool hideVoc=false,initializing=false;
 extern "C" {
@@ -107,27 +112,36 @@ bsec_library_return_t bsec_set_state(const uint8_t*,uint32_t n,uint8_t*,uint32_t
 }
 bsec_library_return_t bsec_update_subscription(const bsec_sensor_configuration_t* requested,uint8_t n,
  bsec_sensor_configuration_t*,uint8_t* required){
- assert(inWorker && n==7 && *required==BSEC_MAX_PHYSICAL_SENSOR);
- for(unsigned i=0;i<n;++i)assert(requested[i].sample_rate==BSEC_SAMPLE_RATE_LP);
+ assert(inWorker && n==8 && *required==BSEC_MAX_PHYSICAL_SENSOR);
+ pressureSubscribed=false;
+ for(unsigned i=0;i<n;++i){
+  assert(requested[i].sample_rate==BSEC_SAMPLE_RATE_LP);
+  if(requested[i].sensor_id==BSEC_OUTPUT_RAW_PRESSURE)pressureSubscribed=true;
+ }
  assert(requested[0].sensor_id==BSEC_OUTPUT_IAQ && requested[1].sensor_id==BSEC_OUTPUT_CO2_EQUIVALENT && requested[2].sensor_id==BSEC_OUTPUT_BREATH_VOC_EQUIVALENT);
  *required=0;return BSEC_OK;
 }
 bsec_library_return_t bsec_sensor_control(int64_t time,bsec_bme_settings_t* out){
  assert(inWorker);++controls;*out={};out->next_call=time+3000000000LL;
  out->op_mode=BME68X_FORCED_MODE;out->trigger_measurement=1;
- out->temperature_oversampling=2;out->pressure_oversampling=4;out->humidity_oversampling=1;
+ out->temperature_oversampling=2;out->humidity_oversampling=1;
+ // Match the stock binary's subscription-dependent pressure configuration.
+ const bool pressureEnabled=pressureSubscribed&&!forcePressureOff;
+ out->pressure_oversampling=pressureEnabled?BME68X_OS_16X:BME68X_OS_NONE;
  out->heater_temperature=320;out->heater_duration=150;
- out->process_data=BSEC_PROCESS_PRESSURE|BSEC_PROCESS_TEMPERATURE|BSEC_PROCESS_HUMIDITY|BSEC_PROCESS_GAS|BSEC_PROCESS_PROFILE_PART|(1UL<<(BSEC_INPUT_HEATSOURCE-1));
+ out->process_data=BSEC_PROCESS_TEMPERATURE|BSEC_PROCESS_HUMIDITY|BSEC_PROCESS_GAS|BSEC_PROCESS_PROFILE_PART|(1UL<<(BSEC_INPUT_HEATSOURCE-1));
+ if(pressureEnabled||forcePressureRequired)out->process_data|=BSEC_PROCESS_PRESSURE;
  return bsec_library_return_t(controlStatus);
 }
 bsec_library_return_t bsec_do_steps(const bsec_input_t* inputs,uint8_t n,bsec_output_t* out,uint8_t* count){
- assert(inWorker && n==6 && *count==BSEC_NUMBER_OUTPUTS);++steps;
+ const bool expectPressure=(pressureSubscribed&&!forcePressureOff)||forcePressureRequired;
+ assert(inWorker && n==(expectPressure?6:5) && *count==BSEC_NUMBER_OUTPUTS);++steps;
  bool pressure=false;
  for(unsigned i=0;i<n;++i){
   if(inputs[i].sensor_id==BSEC_INPUT_PRESSURE){assert(inputs[i].signal==98765);pressure=true;}
   if(inputs[i].sensor_id==BSEC_INPUT_HEATSOURCE)assert(inputs[i].signal==0);
  }
- assert(pressure);*count=7;memset(out,0,sizeof(bsec_output_t)*7);
+ assert(pressure==expectPressure);*count=7;memset(out,0,sizeof(bsec_output_t)*7);
  const uint8_t ids[]={BSEC_OUTPUT_IAQ,BSEC_OUTPUT_CO2_EQUIVALENT,BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,BSEC_OUTPUT_STABILIZATION_STATUS,BSEC_OUTPUT_RUN_IN_STATUS,BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY};
  const float values[]={42.25f,1234.5f,1.23456789f,1,1,19.25f,57.5f};
  for(unsigned i=0;i<7;++i){out[i].sensor_id=ids[i];out[i].signal=values[i];out[i].accuracy=initializing?0:3;}
@@ -172,6 +186,7 @@ int main(int argc,char** argv){
  }else{
   assert(sensorLatestSnapshot(&sample) && sensorPresent());
   assert(sample.environment.temperatureC==(test=="gas_invalid"?20.25:19.25) && sample.environment.pressurePa==98765);
+  assert(pressureSubscribed && configuredPressureOversampling==BME68X_OS_16X);
   assert(Wire1.begins==1 && Wire.begins==0 && triggers==3 && fetches==3);
   assert(heaterTemperature==320 && heaterDuration==150); // BSEC owns the heater.
   if(test=="gas_invalid")assert(!sample.environment.gasValid && sample.airQuality.validMask==0 && steps==0);
@@ -224,6 +239,20 @@ int main(int argc,char** argv){
   initializing=true;advance(4000);
   assert(sensorLatestSnapshot(&sample) && sample.airQuality.validMask==7 && sample.airQuality.iaqAccuracy==0);
  }
+ if(test=="pressure_disabled" || test=="pressure_required_but_disabled"){
+  const unsigned before=steps,startsBefore=initializations;
+  forcePressureOff=true;forcePressureRequired=test=="pressure_required_but_disabled";
+  advance(7000);assert(sensorPresent() && sensorLatestSnapshot(&sample));
+  assert(configuredPressureOversampling==BME68X_OS_NONE && std::isnan(sample.environment.pressurePa));
+  assert(sensorValidMask(sample)==(forcePressureRequired?0x0B:0x7B));
+  assert(forcePressureRequired?steps==before:steps>before);
+  assert(sample.temperatureHumidityCompensated==!forcePressureRequired);
+  SensorSnapshot stored{};assert(storageLatestSnapshot(&stored));
+  assert(std::isnan(stored.environment.pressurePa) && sensorValidMask(stored)==sensorValidMask(sample));
+  forcePressureOff=forcePressureRequired=false;advance(4000);
+  assert(sensorLatestSnapshot(&sample) && sensorValidMask(sample)==0x7F && sample.environment.pressurePa==98765);
+  assert(initializations==startsBefore && steps>before);
+ }
  if(test=="invalid_numeric" || test=="invalid_humidity" || test=="invalid_pressure"){
   const auto before=storageGeneration();const auto stepsBefore=steps,startsBefore=initializations;
   const uint8_t missing=test=="invalid_numeric"?1:test=="invalid_humidity"?2:4;
@@ -269,7 +298,8 @@ with tempfile.TemporaryDirectory(prefix='bsec-service-') as tmp:
     exe=folder/'bsec'
     cases=['healthy','gas_invalid','retry','rollover','restore','reject_restore','state',
            'missing_fields','errors','warning','save_retry','save_interval','partial_output','initializing',
-           'invalid_numeric','invalid_humidity','invalid_pressure','all_invalid','direct_ring_and_stop']
+           'invalid_numeric','invalid_humidity','invalid_pressure','all_invalid','direct_ring_and_stop',
+           'pressure_disabled','pressure_required_but_disabled']
     for level in [0,3,5]:
         subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-DFW_LOG_LEVEL='+str(level),*STORAGE_LINK_FLAGS,
                         '-I',str(folder),'-I',str(BSEC/'src'),'-I',str(BME/'src'),str(folder/'fixture.cpp'),
